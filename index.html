@@ -156,7 +156,7 @@
 
 <div id="settings">
     <label>
-        <input type="checkbox" id="advancedToggle"> Advanced Mode
+        <input type="checkbox" id="advancedToggle"> Options
     </label>
     <div id="advancedControls">
         <label style="font-size:12px">
@@ -168,13 +168,14 @@
             <input type="range" id="distSlider" min="500" max="4000" step="100" value="1800">
         </label>
         <label style="font-size:12px">
-            Density: <span id="densityVal">1.00</span>
-            <!-- UPDATED: More precise step -->
-            <input type="range" id="densitySlider" min="0" max="2" step="0.01" value="1.0">
+            Density: <span id="densityVal">0.70</span>
+            <!-- UPDATED: Default 0.7 -->
+            <input type="range" id="densitySlider" min="0" max="2" step="0.01" value="0.7">
         </label>
         <label style="font-size:12px">
-            Flyby Radius: <span id="flybyVal">1.25x</span>
-            <input type="range" id="flybySlider" min="1.05" max="2.0" step="0.05" value="1.25">
+            Flyby Radius: <span id="flybyVal">1.50x</span>
+            <!-- UPDATED: Default 1.5 -->
+            <input type="range" id="flybySlider" min="1.05" max="2.0" step="0.05" value="1.5">
         </label>
     </div>
 </div>
@@ -282,8 +283,9 @@ const GRID_SIZE = 400;
 let RENDER_DIST = 1800;
 let FOG_START = 1000;
 // Density & Flyby Settings
-let WORLD_DENSITY = 1.0;
-let FLYBY_RADIUS_MULT = 1.25;
+// UPDATED: Default values
+let WORLD_DENSITY = 0.7;
+let FLYBY_RADIUS_MULT = 1.5;
 
 // Game State
 let planets = [];
@@ -821,6 +823,10 @@ function updateFloatingTexts() {
 }
 
 function triggerExplosion(text) {
+    // PERFORMANCE FIX: Limit number of simultaneous explosions
+    if (centralExplosions.length > 2) {
+        centralExplosions.shift(); // Remove oldest
+    }
     centralExplosions.push({
         text: text,
         life: 1.0,
@@ -1165,7 +1171,8 @@ class Player {
         this.currentPlanet = null; 
         this.lastPlanet = null;
         this.jumpCooldown = 0;
-        this.runSpeed = 4.0;
+        // Don't reset speed here if slider exists; we'll handle in resetGameMode
+        this.runSpeed = 4.0; 
         this.pos = V3.create(0, 0, 0);
         this.vel = V3.create(0, 0, 0);
         this.orbitAxis = V3.create(0, 0, 1);
@@ -1584,10 +1591,9 @@ function resetGameMode() {
     document.getElementById('gameCanvas').style.display = 'block'; 
     steerHint.style.display = 'block';
     
-    // Updated default speed
-    player.runSpeed = 1.0;
-    speedSlider.value = 1.0;
-    speedVal.innerText = 1.0;
+    // UPDATED: Preserve current speed setting
+    player.runSpeed = parseFloat(speedSlider.value);
+    // Don't reset sliders here, they should persist
     
     camPosSmooth.set(0,0,500);
     camUpSmooth.set(0,1,0);
@@ -1626,13 +1632,21 @@ distSlider.addEventListener('input', () => {
         scene.fog.near = FOG_START;
     }
 });
-densitySlider.addEventListener('input', () => {
-    // UPDATED: Precision 0.01
+
+// UPDATED: Density listener
+// 'change' fires only on drag release/commit, preventing spam resets
+densitySlider.addEventListener('change', () => {
     const val = parseFloat(densitySlider.value);
     WORLD_DENSITY = val;
-    // Show 2 decimals
+    densityVal.innerText = val.toFixed(2);
+    resetGameMode(); // Live update by restarting
+});
+// 'input' for visual updates while dragging
+densitySlider.addEventListener('input', () => {
+    const val = parseFloat(densitySlider.value);
     densityVal.innerText = val.toFixed(2);
 });
+
 flybySlider.addEventListener('input', () => {
     FLYBY_RADIUS_MULT = parseFloat(flybySlider.value);
     flybyVal.innerText = FLYBY_RADIUS_MULT + "x";
