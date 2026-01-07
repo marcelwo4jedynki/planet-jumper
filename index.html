@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Planet Jumper</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050510;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: white;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+        p {
+            margin: 5px 0;
+            font-size: 14px;
+            color: #aaa;
+        }
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            font-size: 16px;
+            color: rgba(255, 255, 255, 0.7);
+            pointer-events: none;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 0.4; }
+            50% { opacity: 1; }
+            100% { opacity: 0.4; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h1>PLANET JUMPER</h1>
+    <p>Score: <span id="score">0</span></p>
+    <p>Velocity: <span id="vel">0</span></p>
+</div>
+<div id="controls-hint">Tap / Click to Jump</div>
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * Simple 1D/2D Perlin Noise Implementation
+ * Used to determine planet size and existence probability
+ */
+const Perlin = {
+    rand: {},
+    seed: function(seed) {
+        this.rand = { seed: seed };
+    },
+    // Simple pseudo-random
+    random: function() {
+        var x = Math.sin(this.rand.seed++) * 10000;
+        return x - Math.floor(x);
+    },
+    fade: function(t) { return t * t * t * (t * (t * 6 - 15) + 10); },
+    lerp: function(t, a, b) { return a + t * (b - a); },
+    grad: function(hash, x, y, z) {
+        var h = hash & 15;
+        var u = h < 8 ? x : y, v = h < 4 ? y : h == 12 || h == 14 ? x : z;
+        return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+    },
+    scale: function(n) { return (1 + n) / 2; },
+    // 2D Noise
+    noise: function(x, y) {
+        // Permutation table (normally precomputed, but we generate on fly for brevity/randomness)
+        // We use a simple hashing function instead of a full P array for infinite world support
+        const p = (X, Y) => {
+            let n = X + Y * 57;
+            n = (n << 13) ^ n;
+            return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0);
+        };
+
+        var X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+        x -= Math.floor(x); y -= Math.floor(y);
+        var u = this.fade(x), v = this.fade(y);
+        
+        // Hash coordinates
+        // Using a simpler value noise approach here effectively for the infinite grid
+        // to keep code minimal while satisfying "noise generated" look
+        let aa = p(X, Y);
+        let ab = p(X, Y + 1);
+        let ba = p(X + 1, Y);
+        let bb = p(X + 1, Y + 1);
+
+        return this.lerp(v, this.lerp(u, aa, ba), this.lerp(u, ab, bb));
+    }
+};
+
+// --- Game Constants & Setup ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const velEl = document.getElementById('vel');
+
+let width, height;
+const GRAVITY = 0.5; // Renamed from G to avoid global conflicts
+const MAX_GRAVITY_DIST = 800; // Max distance to feel gravity
+const GRID_SIZE = 400; // Size of procedural generation grid cells
+
+// Game State
+let planets = [];
+let stars = [];
+let player;
+let camera = { x: 0, y: 0, zoom: 1 };
+let score = 0;
+let gameTime = 0;
+let message = "";
+let messageTimer = 0;
+
+// Resize handling
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Classes ---
+
+class Planet {
+    constructor(x, y, radius, type) {
+        this.x = x;
+        this.y = y;
+        this.radius = radius;
+        this.mass = radius * radius * 0.5; // Mass proportional to area
+        this.color = this.generateColor(type);
+        this.visited = false;
+        
+        // Atmosphere/Glow
+        this.atmosphereColor = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, 0.1)`;
+    }
+
+    generateColor(val) {
+        // Generate color based on noise value or random
+        const r = Math.floor(100 + val * 155);
+        const g = Math.floor(50 + Math.random() * 100);
+        const b = Math.floor(100 + Math.random() * 155);
+        return { r, g, b, str: `rgb(${r},${g},${b})` };
+    }
+
+    draw(ctx, camX, camY) {
+        // Draw Atmosphere
+        ctx.beginPath();
+        ctx.arc(this.x - camX, this.y - camY, this.radius * 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = this.atmosphereColor;
+        ctx.fill();
+
+        // Draw Planet Body
+        ctx.beginPath();
+        ctx.arc(this.x - camX, this.y - camY, this.radius, 0, Math.PI * 2);
+        
+        // Create gradient for 3D look
+        const grad = ctx.createRadialGradient(
+            this.x - camX - this.radius * 0.3, 
+            this.y - camY - this.radius * 0.3, 
+            this.radius * 0.1, 
+            this.x - camX, 
+            this.y - camY, 
+            this.radius
+        );
+        grad.addColorStop(0, this.color.str);
+        grad.addColorStop(1, 'rgba(10,10,20,1)'); // Shadow side
+        
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // Draw visited marker
+        if (this.visited) {
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(this.x - camX, this.y - camY, this.radius + 5, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
+}
+
+class Player {
+    constructor() {
+        this.width = 10;
+        this.height = 10;
+        this.color = '#00ffff';
+        
+        this.reset();
+    }
+
+    reset() {
+        this.state = 'orbiting'; // 'orbiting' or 'flying'
+        this.currentPlanet = null; // Reference to planet object
+        this.angle = -Math.PI / 2; // Angle on planet
+        this.angularVelocity = 0.05;
+        this.runSpeed = 3; // Surface speed
+        
+        this.pos = { x: 0, y: 0 };
+        this.vel = { x: 0, y: 0 };
+        this.jumpStartPos = null;
+        
+        // Trail
+        this.history = [];
+    }
+
+    update() {
+        if (this.state === 'orbiting') {
+            this.updateOrbit();
+        } else {
+            this.updateFlight();
+        }
+
+        // Trail Logic
+        if (gameTime % 3 === 0) {
+            this.history.push({x: this.pos.x, y: this.pos.y});
+            if (this.history.length > 20) this.history.shift();
+        }
+    }
+
+    updateOrbit() {
+        if (!this.currentPlanet) return;
+
+        // Move angle based on speed / radius (smaller planets = faster angular speed)
+        // v = r * omega => omega = v / r
+        const omega = this.runSpeed / this.currentPlanet.radius;
+        this.angle += omega;
+
+        // Calculate Position
+        this.pos.x = this.currentPlanet.x + Math.cos(this.angle) * (this.currentPlanet.radius + this.height/2);
+        this.pos.y = this.currentPlanet.y + Math.sin(this.angle) * (this.currentPlanet.radius + this.height/2);
+
+        // Update velocity vector to be tangent (for when we jump)
+        // Tangent is perpendicular to radius vector
+        // Radius vector angle is this.angle. Tangent is angle + 90 deg (PI/2)
+        const tangentAngle = this.angle + Math.PI / 2;
+        const speed = this.runSpeed; // Base run speed
+        
+        this.vel.x = Math.cos(tangentAngle) * speed;
+        this.vel.y = Math.sin(tangentAngle) * speed;
+    }
+
+    updateFlight() {
+        // Apply Gravity from all nearby planets
+        let gx = 0;
+        let gy = 0;
+
+        planets.forEach(p => {
+            const dx = p.x - this.pos.x;
+            const dy = p.y - this.pos.y;
+            const distSq = dx*dx + dy*dy;
+            const dist = Math.sqrt(distSq);
+
+            // Optimization: Only calculate if within range
+            if (dist < MAX_GRAVITY_DIST) {
+                // Newton's Law: F = G * (m1*m2) / r^2
+                // We assume player mass is 1. F = a.
+                const force = GRAVITY * p.mass / distSq;
+                
+                // Direction
+                gx += (dx / dist) * force;
+                gy += (dy / dist) * force;
+
+                // Collision Detection
+                if (dist < p.radius + this.height/2) {
+                    this.land(p);
+                }
+            }
+        });
+
+        this.vel.x += gx;
+        this.vel.y += gy;
+
+        this.pos.x += this.vel.x;
+        this.pos.y += this.vel.y;
+    }
+
+    jump() {
+        if (this.state !== 'orbiting' || !this.currentPlanet) return;
+        
+        this.jumpStartPos = { x: this.pos.x, y: this.pos.y };
+
+        // Calculate Escape Velocity needed for visual feedback or mechanics
+        // Ve = sqrt(2 * G * M / r)
+        const ve = Math.sqrt(2 * GRAVITY * this.currentPlanet.mass / this.currentPlanet.radius);
+        
+        // Recalculate precise launch vectors to prevent stale velocity issues
+        // Tangent is perpendicular to radius vector (angle + 90 deg)
+        const normalAngle = this.angle;
+        const tangentAngle = this.angle + Math.PI / 2;
+
+        // Base Tangential Velocity (Orbital speed)
+        const vx = Math.cos(tangentAngle) * this.runSpeed;
+        const vy = Math.sin(tangentAngle) * this.runSpeed;
+        
+        // Jump Force (Normal/Outwards)
+        const jumpStrength = 6.0; 
+        const jx = Math.cos(normalAngle) * jumpStrength;
+        const jy = Math.sin(normalAngle) * jumpStrength;
+
+        // Combine and Boost
+        // We set velocity directly rather than adding to potentially stale values
+        this.vel.x = (vx + jx) * 1.2;
+        this.vel.y = (vy + jy) * 1.2;
+
+        // Safety Nudge: Push player slightly out of collision radius
+        // This prevents the physics engine from immediately "landing" the player again
+        // if the first frame of movement isn't quite enough to clear the surface.
+        this.pos.x += Math.cos(normalAngle) * 2;
+        this.pos.y += Math.sin(normalAngle) * 2;
+
+        this.state = 'flying';
+        this.currentPlanet = null;
+        
+        // Visual flair
+        createParticles(this.pos.x, this.pos.y, 10, '#fff');
+    }
+
+    land(planet) {
+        this.state = 'orbiting';
+        this.currentPlanet = planet;
+        
+        // Calculate landing angle
+        const dx = this.pos.x - planet.x;
+        const dy = this.pos.y - planet.y;
+        this.angle = Math.atan2(dy, dx);
+        
+        // Stop velocity
+        this.vel.x = 0;
+        this.vel.y = 0;
+
+        // Score logic
+        if (!planet.visited) {
+            let points = 100;
+            if (this.jumpStartPos) {
+                const dist = Math.sqrt(Math.pow(this.pos.x - this.jumpStartPos.x, 2) + Math.pow(this.pos.y - this.jumpStartPos.y, 2));
+                points = Math.floor(dist);
+            }
+
+            score += points;
+            scoreEl.innerText = score;
+            planet.visited = true;
+            createFloatingText(this.pos.x, this.pos.y, "+" + points);
+        }
+    }
+
+    draw(ctx, camX, camY) {
+        // Draw Trail
+        ctx.beginPath();
+        for (let i = 0; i < this.history.length; i++) {
+            const p = this.history[i];
+            ctx.lineTo(p.x - camX, p.y - camY);
+        }
+        ctx.strokeStyle = `rgba(0, 255, 255, 0.4)`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Draw Player
+        ctx.save();
+        ctx.translate(this.pos.x - camX, this.pos.y - camY);
+        
+        // Rotate to match surface normal if orbiting, or velocity if flying
+        if (this.state === 'orbiting') {
+            ctx.rotate(this.angle + Math.PI/2);
+        } else {
+            // Align with velocity
+            ctx.rotate(Math.atan2(this.vel.y, this.vel.x) + Math.PI/2);
+        }
+
+        ctx.fillStyle = this.color;
+        // Simple triangle shape
+        ctx.beginPath();
+        ctx.moveTo(0, -this.height);
+        ctx.lineTo(-this.width/2, this.height/2);
+        ctx.lineTo(this.width/2, this.height/2);
+        ctx.closePath();
+        ctx.fill();
+
+        // Engine glow
+        if (this.state === 'flying') {
+            ctx.beginPath();
+            ctx.moveTo(-3, this.height/2);
+            ctx.lineTo(3, this.height/2);
+            ctx.lineTo(0, this.height/2 + Math.random() * 10);
+            ctx.fillStyle = '#ffaa00';
+            ctx.fill();
+        }
+
+        ctx.restore();
+    }
+}
+
+// --- Procedural Generation ---
+
+// Track generated chunks to avoid duplicates
+const generatedChunks = new Set();
+
+function getChunkId(gx, gy) {
+    return `${gx},${gy}`;
+}
+
+function generateWorld(playerX, playerY) {
+    // Determine which grid cell the player is in
+    const gridX = Math.floor(playerX / GRID_SIZE);
+    const gridY = Math.floor(playerY / GRID_SIZE);
+
+    // Generate in a 3x3 radius of chunks around player
+    for (let x = gridX - 2; x <= gridX + 2; x++) {
+        for (let y = gridY - 2; y <= gridY + 2; y++) {
+            const id = getChunkId(x, y);
+            if (!generatedChunks.has(id)) {
+                generateChunk(x, y);
+                generatedChunks.add(id);
+            }
+        }
+    }
+}
+
+function generateChunk(gx, gy) {
+    // Use Perlin noise to decide if a planet exists here
+    // We scale coords to make noise smoother
+    const scale = 0.1;
+    const noiseVal = Perlin.noise(gx * scale, gy * scale);
+    
+    // Threshold for planet existence (between -1 and 1 usually, mapped 0-1 here effectively by logic)
+    // We want them "neither too rare nor too frequent"
+    // noiseVal is roughly -1 to 1.
+    
+    // Use a pseudo random based on grid coord for placement jitter
+    const seed = gx * 49234 + gy * 12345;
+    const rnd = (Math.sin(seed) + 1) / 2; // 0 to 1
+
+    if ((gx === 0 && gy === 0) || noiseVal > 0.2 || (rnd > 0.8 && noiseVal > -0.2)) {
+        // Calculate center of this grid cell
+        const cx = gx * GRID_SIZE + GRID_SIZE / 2;
+        const cy = gy * GRID_SIZE + GRID_SIZE / 2;
+        
+        // Jitter position
+        const offsetX = (Math.cos(seed) * GRID_SIZE) * 0.3;
+        const offsetY = (Math.sin(seed * 2) * GRID_SIZE) * 0.3;
+        
+        let px = cx + offsetX;
+        let py = cy + offsetY;
+
+        // Radius based on noise + random
+        let radius = 30 + rnd * 60; // 30 to 90
+        
+        // Ensure starting area is safe (0,0)
+        if (gx === 0 && gy === 0) {
+            radius = 60; // Fixed start planet
+            px = 0;
+            py = 0;
+        }
+
+        const p = new Planet(px, py, radius, noiseVal);
+        
+        // Mark start planet visited
+        if (gx === 0 && gy === 0) p.visited = true;
+
+        planets.push(p);
+    }
+
+    // Generate Stars background data for this chunk (visual only)
+    for(let i=0; i<3; i++) {
+        stars.push({
+            x: gx * GRID_SIZE + Math.random() * GRID_SIZE,
+            y: gy * GRID_SIZE + Math.random() * GRID_SIZE,
+            size: Math.random() * 2,
+            alpha: Math.random()
+        });
+    }
+}
+
+// --- Effects ---
+let particles = [];
+let floatingTexts = [];
+
+function createParticles(x, y, count, color) {
+    for(let i=0; i<count; i++) {
+        particles.push({
+            x: x,
+            y: y,
+            vx: (Math.random() - 0.5) * 5,
+            vy: (Math.random() - 0.5) * 5,
+            life: 1.0,
+            color: color
+        });
+    }
+}
+
+function createFloatingText(x, y, text) {
+    floatingTexts.push({ x, y, text, life: 1.0, yOff: 0 });
+}
+
+function updateEffects() {
+    // Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 0.02;
+        if (p.life <= 0) particles.splice(i, 1);
+    }
+    // Texts
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+        const t = floatingTexts[i];
+        t.yOff -= 1;
+        t.life -= 0.015;
+        if (t.life <= 0) floatingTexts.splice(i, 1);
+    }
+}
+
+function drawEffects(ctx, camX, camY) {
+    // Particles
+    particles.forEach(p => {
+        ctx.globalAlpha = p.life;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - camX, p.y - camY, 3, 3);
+    });
+    ctx.globalAlpha = 1;
+
+    // Texts
+    ctx.textAlign = "center";
+    ctx.font = "bold 20px Arial";
+    floatingTexts.forEach(t => {
+        ctx.fillStyle = `rgba(255, 255, 100, ${t.life})`;
+        ctx.fillText(t.text, t.x - camX, t.y - camY + t.yOff);
+    });
+}
+
+// --- Main Loop ---
+
+function init() {
+    player = new Player();
+    // Initial generation around 0,0
+    generateWorld(0, 0);
+    
+    // Find start planet and attach player
+    const startPlanet = planets.find(p => Math.abs(p.x) < 200 && Math.abs(p.y) < 200);
+    if (startPlanet) {
+        player.land(startPlanet);
+        player.angle = -Math.PI/2;
+    }
+
+    loop();
+}
+
+function update() {
+    gameTime++;
+    player.update();
+    
+    // Generate world as player moves
+    generateWorld(player.pos.x, player.pos.y);
+
+    // Camera follow player with smoothing
+    const targetX = player.pos.x - width / 2;
+    const targetY = player.pos.y - height / 2;
+    camera.x += (targetX - camera.x) * 0.1;
+    camera.y += (targetY - camera.y) * 0.1;
+
+    // Update UI
+    const v = Math.sqrt(player.vel.x**2 + player.vel.y**2).toFixed(1);
+    velEl.innerText = v;
+
+    updateEffects();
+}
+
+function draw() {
+    ctx.fillStyle = '#050510';
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw Stars (Parallax optional, simplified here)
+    ctx.fillStyle = 'white';
+    stars.forEach(s => {
+        // Simple culling
+        if (s.x > camera.x && s.x < camera.x + width &&
+            s.y > camera.y && s.y < camera.y + height) {
+            ctx.globalAlpha = s.alpha;
+            ctx.beginPath();
+            ctx.arc(s.x - camera.x, s.y - camera.y, s.size, 0, Math.PI*2);
+            ctx.fill();
+        }
+    });
+    ctx.globalAlpha = 1;
+
+    // Draw Planets (Only if visible)
+    // Draw Gravity Fields (subtle lines)
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 1;
+    
+    planets.forEach(p => {
+        // Culling
+        const margin = p.radius + 100;
+        if (p.x + margin > camera.x && p.x - margin < camera.x + width &&
+            p.y + margin > camera.y && p.y - margin < camera.y + height) {
+            p.draw(ctx, camera.x, camera.y);
+        }
+    });
+
+    player.draw(ctx, camera.x, camera.y);
+    drawEffects(ctx, camera.x, camera.y);
+
+    // Velocity Vector Indicator (when flying)
+    if (player.state === 'flying') {
+        const cx = player.pos.x - camera.x;
+        const cy = player.pos.y - camera.y;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + player.vel.x * 10, cy + player.vel.y * 10);
+        ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+        ctx.stroke();
+    }
+}
+
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// --- Input ---
+
+function handleInput() {
+    if (player.state === 'orbiting') {
+        player.jump();
+    }
+}
+
+window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') handleInput();
+});
+
+window.addEventListener('mousedown', handleInput);
+window.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    handleInput();
+}, {passive: false});
+
+// Start
+init();
+
+</script>
+</body>
+</html>
