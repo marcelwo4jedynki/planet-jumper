@@ -100,6 +100,21 @@
             border-left: 2px solid #444;
             display: none;
         }
+        #gameOverScreen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            pointer-events: auto;
+        }
+        #gameOverScreen h2 { font-size: 40px; color: #ff3333; margin-bottom: 20px; }
+        #gameOverScreen button {
+            padding: 10px 20px; font-size: 20px; background: #00ffff; border: none; cursor: pointer; border-radius: 5px;
+        }
         @keyframes pulse {
             0% { opacity: 0.4; }
             50% { opacity: 1; }
@@ -136,6 +151,12 @@
     <div id="steer-hint" style="display:none; margin-top:5px; font-size: 12px; color: #00ffff;">
         Use <span class="key">←</span> <span class="key">→</span> to steer orbit
     </div>
+</div>
+
+<div id="gameOverScreen">
+    <h2>MISSION FAILED</h2>
+    <p style="font-size: 20px; color: white; margin-bottom: 20px;">You landed on a hazardous planet!</p>
+    <button onclick="resetGameMode()">RESTART</button>
 </div>
 
 <canvas id="gameCanvas"></canvas>
@@ -210,11 +231,14 @@ const advancedControls = document.getElementById('advancedControls');
 const speedSlider = document.getElementById('speedSlider');
 const speedVal = document.getElementById('speedVal');
 const steerHint = document.getElementById('steer-hint');
+const gameOverScreen = document.getElementById('gameOverScreen');
 
 let width, height;
 const GRAVITY = 0.5;
 const MAX_GRAVITY_DIST = 800;
-const GRID_SIZE = 400;
+
+// Increased grid size for much wider spread
+const GRID_SIZE = 1000; 
 
 // Game State
 let planets = [];
@@ -225,6 +249,10 @@ let score = 0;
 let gameTime = 0;
 let is3DMode = false;
 let inputState = { left: false, right: false };
+let isGameOver = false;
+
+// Optimization: Track last chunk to avoid spamming generation
+let lastChunk = {x: -999, y: -999, z: -999};
 
 // 3D Engine Globals
 let scene, camera3D, renderer3D, playerMesh3D;
@@ -255,7 +283,7 @@ let sharedSphereGeo;
 
 // --- CUSTOM SHADERS ---
 
-// 1. Planet Shader (5 Color Biome)
+// 1. Planet Shader (5 Color Biome + Danger/Bonus pulse)
 const planetVertexShader = `
 varying vec3 vWorldPosition;
 varying vec3 vNormal;
@@ -273,6 +301,9 @@ uniform vec3 color2;
 uniform vec3 color3;
 uniform vec3 color4;
 uniform vec3 color5;
+
+uniform vec3 blinkColor;
+uniform float blinkStrength;
 
 varying vec3 vWorldPosition;
 varying vec3 vNormal;
@@ -359,7 +390,12 @@ void main() {
     float diff = max(dot(vNormal, lightDir), 0.0);
     float ambient = 0.2;
     
-    gl_FragColor = vec4(finalColor * (diff + ambient), 1.0);
+    vec3 baseCol = finalColor * (diff + ambient);
+    
+    // Add pulsing blink color overlay (additive)
+    vec3 final = baseCol + (blinkColor * blinkStrength);
+    
+    gl_FragColor = vec4(final, 1.0);
 }
 `;
 
@@ -382,7 +418,8 @@ window.addEventListener('resize', resize);
 function init3D() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x050510);
-    scene.fog = new THREE.Fog(0x050510, 500, 3000);
+    // Reduced fog range for smoother edge fading with smaller render distance
+    scene.fog = new THREE.Fog(0x050510, 200, 1200);
 
     camera3D = new THREE.PerspectiveCamera(60, width / height, 0.1, 5000);
     
@@ -449,15 +486,50 @@ function init3D() {
     starPoints = new THREE.Points(starGeometry, starMat);
     scene.add(starPoints);
 
-    // Shield Hexagon Particles (Instanced Mesh)
-    // Larger Ring
-    const hexGeo = new THREE.RingGeometry(2.0, 2.5, 6); 
+    // --- REIMPLEMENTED HEXAGON FROM SCRATCH (BUFFER GEOMETRY) ---
+    // Manually define vertices for a hexagon ring to be 100% "pure code"
+    const hexRadius = 2.5;
+    const hexThickness = 0.5;
+    const hexInnerR = hexRadius - hexThickness;
+    const hexGeo = new THREE.BufferGeometry();
+    
+    // We need 6 quads (12 triangles) to make a ring. 
+    // Each quad has 2 triangles (6 vertices). Total 36 vertices.
+    // Or we can index them. Let's use simple vertex soup for clarity.
+    const hexVertices = [];
+    
+    for (let i = 0; i < 6; i++) {
+        const theta1 = (i / 6) * Math.PI * 2;
+        const theta2 = ((i + 1) / 6) * Math.PI * 2;
+        
+        // Outer Points
+        const o1x = Math.cos(theta1) * hexRadius; const o1y = Math.sin(theta1) * hexRadius;
+        const o2x = Math.cos(theta2) * hexRadius; const o2y = Math.sin(theta2) * hexRadius;
+        
+        // Inner Points
+        const i1x = Math.cos(theta1) * hexInnerR; const i1y = Math.sin(theta1) * hexInnerR;
+        const i2x = Math.cos(theta2) * hexInnerR; const i2y = Math.sin(theta2) * hexInnerR;
+        
+        // Triangle 1: O1, I1, O2
+        hexVertices.push(o1x, o1y, 0);
+        hexVertices.push(i1x, i1y, 0);
+        hexVertices.push(o2x, o2y, 0);
+        
+        // Triangle 2: I1, I2, O2
+        hexVertices.push(i1x, i1y, 0);
+        hexVertices.push(i2x, i2y, 0);
+        hexVertices.push(o2x, o2y, 0);
+    }
+    
+    hexGeo.setAttribute('position', new THREE.Float32BufferAttribute(hexVertices, 3));
+
     const hexMat = new THREE.MeshBasicMaterial({ 
         color: 0x00aaff, 
         transparent: true, 
         opacity: 0.8, 
         side: THREE.DoubleSide,
         depthWrite: false,
+        depthTest: false, // FORCE VISIBILITY through walls
         blending: THREE.AdditiveBlending
     });
     hexParticles = new THREE.InstancedMesh(hexGeo, hexMat, hexCount);
@@ -465,6 +537,8 @@ function init3D() {
     for(let i=0; i<hexCount; i++) {
         hexData.push({ life: 0, x:0, y:0, z:0, dirX:0, dirY:0, dirZ:0 });
     }
+    // Set render order high to draw on top of planet surface
+    hexParticles.renderOrder = 999;
     scene.add(hexParticles);
 
     // Fire Particles (Re-entry)
@@ -505,7 +579,8 @@ function updateHexParticles(playerPos, currentPlanet) {
         if (h.life <= 0) {
             if (Math.random() < 0.2) { 
                 h.life = 1.0;
-                // Start slightly BELOW the ship model (relative to planet)
+                
+                // Spawn AT PLAYER POS first
                 h.x = playerPos.x; 
                 h.y = playerPos.y; 
                 h.z = playerPos.z;
@@ -518,17 +593,12 @@ function updateHexParticles(playerPos, currentPlanet) {
                 
                 // Direction normal
                 h.dirX = dx/len; h.dirY = dy/len; h.dirZ = dz/len;
-                
-                // Push start pos "down" towards planet to exit ship nozzle
-                const startOffset = 4.0; 
-                h.x += h.dirX * startOffset;
-                h.y += h.dirY * startOffset;
-                h.z += h.dirZ * startOffset;
             }
         }
         
         if (h.life > 0) {
             h.life -= 0.03;
+            // Move downwards (towards planet)
             const speed = 1.5;
             h.x += h.dirX * speed;
             h.y += h.dirY * speed;
@@ -539,7 +609,7 @@ function updateHexParticles(playerPos, currentPlanet) {
             hexDummy.lookAt(currentPlanet.x, currentPlanet.y, currentPlanet.z);
             
             // Expand and "fade" by scaling
-            const s = (1.2 - h.life) * 5.0; // Grows as life decreases
+            const s = (1.2 - h.life) * 4.0; // Grows as life decreases
             hexDummy.scale.set(s, s, s);
             
             hexDummy.updateMatrix();
@@ -595,7 +665,7 @@ function updateFireParticles(player, planets) {
         }
     }
 
-    fireParticles.visible = reEntry || fireParticles.visible; // Keep visible if existing particles need to fade
+    fireParticles.visible = reEntry || fireParticles.visible; 
     
     // Check if any particles are alive, otherwise we can hide
     let anyAlive = false;
@@ -678,11 +748,9 @@ function updateVisuals3D() {
     if (V3.magSq(player.vel) < 0.1) forward = V3.create(1, 0, 0); 
     
     let up = V3.create(0, 0, 1);
-    // Lazily align bottom with planet gravity if near one
     if (player.state === 'orbiting' && player.currentPlanet) {
         up = V3.norm(V3.sub(player.pos, player.currentPlanet));
     } else {
-        // In flight, try to align 'down' to nearest planet
         let closest = null; let minD = Infinity;
         planets.forEach(p=>{const d=V3.dist(p, player.pos); if(d<minD){minD=d; closest=p;}});
         if(closest && minD < MAX_GRAVITY_DIST) {
@@ -699,24 +767,22 @@ function updateVisuals3D() {
     const targetQ = new THREE.Quaternion();
     targetQ.setFromRotationMatrix(targetM);
     
-    // Slerp current visual rotation to target rotation
-    playerMesh3D.quaternion.slerp(targetQ, 0.08); // Lazy rotation
+    // Very lazy player rotation
+    playerMesh3D.quaternion.slerp(targetQ, 0.02); 
 
-    // --- SMOOTH CAMERA LOGIC ---
+    // --- REVERTED CAMERA LOGIC (WORLD SPACE SMOOTHING) ---
     let idealOffset;
     let idealLookAt = player.pos;
 
-    // Standard chase logic
     if (player.state === 'orbiting' && player.currentPlanet) {
          const pNormal = V3.norm(V3.sub(player.pos, player.currentPlanet));
          const backVec = V3.scale(forward, -100);
          const upVec = V3.scale(pNormal, 60);
          idealOffset = V3.add(player.pos, V3.add(backVec, upVec));
-         camUpSmooth.lerp(new THREE.Vector3(pNormal.x, pNormal.y, pNormal.z), 0.05);
+         camUpSmooth.lerp(new THREE.Vector3(pNormal.x, pNormal.y, pNormal.z), 0.01);
 
     } else {
         const backVec = V3.scale(forward, -120);
-        // Use the smoothed up vector for camera offset to prevent flipping
         const camUpV3 = {x: camUpSmooth.x, y: camUpSmooth.y, z: camUpSmooth.z}; 
         const upVec = V3.scale(camUpV3, 60); 
         idealOffset = V3.add(player.pos, V3.add(backVec, upVec));
@@ -725,31 +791,29 @@ function updateVisuals3D() {
         planets.forEach(p=>{const d=V3.dist(p, player.pos); if(d<minD){minD=d; closest=p;}});
         if(closest && minD < MAX_GRAVITY_DIST) {
              const pNormal = V3.norm(V3.sub(player.pos, closest));
-             camUpSmooth.lerp(new THREE.Vector3(pNormal.x, pNormal.y, pNormal.z), 0.02);
+             camUpSmooth.lerp(new THREE.Vector3(pNormal.x, pNormal.y, pNormal.z), 0.005);
         } else {
-             camUpSmooth.lerp(new THREE.Vector3(0,1,0), 0.01);
+             camUpSmooth.lerp(new THREE.Vector3(0,1,0), 0.005);
         }
     }
     
-    // Damp positions FIRST
+    // World space lerp
     let idealV3 = new THREE.Vector3(idealOffset.x, idealOffset.y, idealOffset.z);
     camPosSmooth.lerp(idealV3, 0.05); 
-    camLookAtSmooth.lerp(new THREE.Vector3(idealLookAt.x, idealLookAt.y, idealLookAt.z), 0.1); 
+    camLookAtSmooth.lerp(new THREE.Vector3(idealLookAt.x, idealLookAt.y, idealLookAt.z), 0.05); 
 
-    // THEN Collision Check: Prevent Camera clipping planets
-    // This pushes the smoothed position out immediately if it enters a planet
+    // Collision Check (Push out from planet)
     planets.forEach(p => {
         const center = new THREE.Vector3(p.x, p.y, p.z);
         const dist = camPosSmooth.distanceTo(center);
         const buffer = 20;
         if (dist < p.radius + buffer) {
-            // Push out along normal
             const normal = new THREE.Vector3().subVectors(camPosSmooth, center).normalize();
+            // Push camera out
             camPosSmooth.copy(center.add(normal.multiplyScalar(p.radius + buffer)));
         }
     });
 
-    // Apply
     camera3D.position.copy(camPosSmooth);
     camera3D.up.copy(camUpSmooth);
     camera3D.lookAt(camLookAtSmooth);
@@ -766,10 +830,12 @@ function updateVisuals3D() {
     }
     starPoints.geometry.attributes.position.needsUpdate = true;
     
-    // Pass current planet to hex particles
     updateHexParticles(player.pos, player.currentPlanet);
-    
     updateFireParticles(player, planets);
+
+    // Global Blink for shader
+    const time = Date.now() * 0.005;
+    const blinkVal = (Math.sin(time) + 1.0) * 0.5;
 
     planets.forEach(p => {
         if (!planetMeshes.has(p)) {
@@ -781,7 +847,9 @@ function updateVisuals3D() {
                     color2: { value: new THREE.Color(p.colors[1]) },
                     color3: { value: new THREE.Color(p.colors[2]) },
                     color4: { value: new THREE.Color(p.colors[3]) },
-                    color5: { value: new THREE.Color(p.colors[4]) }
+                    color5: { value: new THREE.Color(p.colors[4]) },
+                    blinkColor: { value: new THREE.Color(0,0,0) },
+                    blinkStrength: { value: 0.0 }
                 },
                 vertexShader: planetVertexShader,
                 fragmentShader: planetFragmentShader
@@ -792,10 +860,26 @@ function updateVisuals3D() {
             scene.add(group);
             planetMeshes.set(p, group);
         }
+        
+        // Update blink uniforms
+        const meshGroup = planetMeshes.get(p);
+        const mesh = meshGroup.children[0];
+        if (mesh && mesh.material.uniforms) {
+            if (p.specialType === 'trap') {
+                mesh.material.uniforms.blinkColor.value.setHex(0xff0000);
+                mesh.material.uniforms.blinkStrength.value = blinkVal * 0.8;
+            } else if (p.specialType === 'bonus') {
+                mesh.material.uniforms.blinkColor.value.setHex(0x00ff00);
+                mesh.material.uniforms.blinkStrength.value = blinkVal * 0.8;
+            } else {
+                mesh.material.uniforms.blinkStrength.value = 0.0;
+            }
+        }
     });
 
     for (let [p, mesh] of planetMeshes) {
-        if (V3.dist(p, player.pos) > 2500) {
+        // Reduced cleanup distance to match render distance
+        if (V3.dist(p, player.pos) > 1600) { 
             scene.remove(mesh);
             planetMeshes.delete(p);
         }
@@ -811,8 +895,9 @@ class Planet {
         this.radius = radius;
         this.mass = radius * radius * 0.5;
         this.baseColor = this.generateColor(type);
-        this.colors = this.generateBiomeColors(this.baseColor); // 5 colors
+        this.colors = this.generateBiomeColors(this.baseColor); 
         this.visited = false;
+        this.specialType = 'none'; // 'none', 'trap', 'bonus'
         this.atmosphereColor = `rgba(${this.baseColor.r}, ${this.baseColor.g}, ${this.baseColor.b}, 0.2)`;
     }
     
@@ -824,7 +909,6 @@ class Planet {
     }
     
     generateBiomeColors(base) {
-        // Generate 5 variations
         const c1 = new THREE.Color(`rgb(${base.r}, ${base.g}, ${base.b})`);
         const c2 = c1.clone().multiplyScalar(0.8);
         const c3 = c1.clone().multiplyScalar(1.2); 
@@ -862,6 +946,26 @@ class Planet {
             ctx.arc(this.x - camX, this.y - camY, this.radius + 5, 0, Math.PI * 2);
             ctx.stroke();
         }
+
+        // Draw Special Blinking in 2D
+        if (this.specialType !== 'none') {
+            const time = Date.now() * 0.005;
+            const alpha = (Math.sin(time) + 1) * 0.3; 
+            ctx.lineWidth = 4;
+            if (this.specialType === 'trap') {
+                ctx.strokeStyle = `rgba(255, 0, 0, ${alpha})`;
+                ctx.shadowColor = 'red';
+                ctx.shadowBlur = 20;
+            } else {
+                ctx.strokeStyle = `rgba(0, 255, 0, ${alpha})`;
+                ctx.shadowColor = 'green';
+                ctx.shadowBlur = 20;
+            }
+            ctx.beginPath();
+            ctx.arc(this.x - camX, this.y - camY, this.radius + 10, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        }
     }
 }
 
@@ -876,6 +980,8 @@ class Player {
     reset() {
         this.state = 'orbiting'; 
         this.currentPlanet = null; 
+        this.lastPlanet = null;
+        this.jumpCooldown = 0;
         this.runSpeed = 4.0;
         this.angle = -Math.PI/2; 
         this.pos = V3.create(0, 0, 0);
@@ -885,6 +991,7 @@ class Player {
     }
 
     update() {
+        if (this.jumpCooldown > 0) this.jumpCooldown--;
         if (this.state === 'orbiting') this.updateOrbit();
         else this.updateFlight();
     }
@@ -916,6 +1023,9 @@ class Player {
         let gravity = V3.create(0, 0, 0);
 
         planets.forEach(p => {
+            // Ignore gravity of just-left planet for short duration
+            if (this.jumpCooldown > 0 && p === this.lastPlanet) return;
+
             const dist = V3.dist(p, this.pos);
             if (dist < MAX_GRAVITY_DIST) {
                 const fMag = (GRAVITY * p.mass) / (dist*dist);
@@ -938,11 +1048,12 @@ class Player {
         if (this.state !== 'orbiting' || !this.currentPlanet) return;
         
         this.jumpStartPos = { ...this.pos };
+        this.lastPlanet = this.currentPlanet;
+        // 60 frames (approx 1 sec) of gravity-free flight from this planet
+        this.jumpCooldown = 60; 
 
         const normal = V3.norm(V3.sub(this.pos, this.currentPlanet));
         
-        // FIX: Use current velocity direction for jump tangent to match visual heading
-        // If speed is near zero, fallback to cross product
         let tangent;
         if (V3.magSq(this.vel) > 0.01) {
              tangent = V3.norm(this.vel);
@@ -950,23 +1061,34 @@ class Player {
              tangent = V3.norm(V3.cross(this.orbitAxis, normal));
         }
         
-        const jumpStrength = 7.0;
-        const jumpVec = V3.add(
-            V3.scale(tangent, this.runSpeed * 1.2),
-            V3.scale(normal, jumpStrength)
-        );
+        // Powerful tangential burst to escape gravity
+        // No upward component, just pure forward momentum
+        const burstSpeed = 12.0; 
+        const jumpVec = V3.scale(tangent, this.runSpeed + burstSpeed);
         
         this.vel = jumpVec;
-        // Increased initial nudge to ensure clearing landing detection
-        this.pos = V3.add(this.pos, V3.scale(normal, 4.0));
+        // Snap position slightly up to break "landed" check threshold instantly
+        this.pos = V3.add(this.pos, V3.scale(normal, 5.0));
 
         this.state = 'flying';
         this.currentPlanet = null;
     }
 
     land(planet) {
+        // Game Over Logic for Traps
+        if (planet.specialType === 'trap') {
+            gameOverScreen.style.display = 'flex';
+            isGameOver = true;
+            return;
+        }
+
         this.state = 'orbiting';
         this.currentPlanet = planet;
+        this.lastPlanet = null;
+        this.jumpCooldown = 0;
+        
+        // Assign new traps/bonuses around us
+        assignPlanetTypes(planet);
         
         const normal = V3.norm(V3.sub(this.pos, planet));
         let tangent = V3.norm(this.vel);
@@ -984,13 +1106,41 @@ class Player {
                 const dist = V3.dist(this.pos, this.jumpStartPos);
                 points = Math.floor(dist);
             }
+            // Double points for green planets
+            if (planet.specialType === 'bonus') {
+                points *= 2;
+                createFloatingText(this.pos.x, this.pos.y, this.pos.z, "BONUS! +" + points);
+            } else {
+                createFloatingText(this.pos.x, this.pos.y, this.pos.z, "+" + points);
+            }
             score += points;
             scoreEl.innerText = score;
             planet.visited = true;
-            createFloatingText(this.pos.x, this.pos.y, this.pos.z, "+" + points);
         }
     }
 }
+
+// --- Gameplay Logic: Traps & Bonuses ---
+function assignPlanetTypes(currentP) {
+    // Reset all
+    planets.forEach(p => p.specialType = 'none');
+    
+    // Find candidates within reasonable range (not too far, not current)
+    const candidates = planets.filter(p => p !== currentP && V3.dist(p, currentP) < 2500);
+    
+    // Shuffle
+    candidates.sort(() => Math.random() - 0.5);
+    
+    // Pick 3 traps
+    for(let i=0; i<3 && i<candidates.length; i++) {
+        candidates[i].specialType = 'trap';
+    }
+    // Pick 1 bonus (start checking after traps)
+    if (candidates.length > 3) {
+        candidates[3].specialType = 'bonus';
+    }
+}
+
 
 // --- Procedural Generation ---
 
@@ -1002,7 +1152,12 @@ function generateWorld(px, py, pz) {
     const gy = Math.floor(py / GRID_SIZE);
     const gz = Math.floor(pz / GRID_SIZE);
 
-    const rad = 2; 
+    // Optimization: Only generate if chunk coords changed
+    if (gx === lastChunk.x && gy === lastChunk.y && gz === lastChunk.z) return;
+    lastChunk = {x: gx, y: gy, z: gz};
+
+    // Reduced radius for render distance halving (5 -> 3)
+    const rad = 3; 
     const zMin = is3DMode ? gz - rad : 0;
     const zMax = is3DMode ? gz + rad : 0;
 
@@ -1025,19 +1180,34 @@ function generateChunk(gx, gy, gz) {
     const seed = gx * 123 + gy * 456 + gz * 789;
     const rnd = Math.abs(Math.sin(seed));
 
+    // Threshold for density
     if (noiseVal > 0.15 || (rnd > 0.85)) {
         const cx = gx * GRID_SIZE + GRID_SIZE / 2;
         const cy = gy * GRID_SIZE + GRID_SIZE / 2;
         const cz = gz * GRID_SIZE + GRID_SIZE / 2;
         
-        const ox = (Math.cos(seed) * GRID_SIZE) * 0.3;
-        const oy = (Math.sin(seed * 2) * GRID_SIZE) * 0.3;
-        const oz = (Math.cos(seed * 3) * GRID_SIZE) * 0.3;
+        // --- OVERLAP FIX: CONSTRAINED OFFSET ---
+        // Constraint: Planet stays within a safe zone to never overlap neighbor cells
+        // Max Radius approx 140. GRID_SIZE 1000. 
+        // Max offset range must satisfy: offset + radius < GRID_SIZE/2
+        // Safe offset = 500 - 150 - buffer(50) = 300
+        const offsetRange = 300; 
+        
+        // Use deterministic pseudo-random from coords
+        const ox = (Math.sin(gx * 12.9898 + gy * 78.233 + gz * 37.719) * 0.5) * offsetRange;
+        const oy = (Math.cos(gy * 23.381 + gz * 11.21 + gx * 4.91) * 0.5) * offsetRange;
+        const oz = (Math.sin(gz * 91.1 + gx * 7.33 + gy * 19.8) * 0.5) * offsetRange;
 
         let px = cx + ox;
         let py = cy + oy;
         let pz = is3DMode ? cz + oz : 0;
-        let radius = 30 + rnd * 60;
+        
+        // Variable planet sizes based on noise
+        // range: 20 to 120
+        let radius = 20 + Math.abs(noiseVal) * 100 + rnd * 20;
+        
+        // Clamp radius for safety
+        if (radius > 150) radius = 150;
 
         if (gx === 0 && gy === 0 && gz === 0) {
             px=0; py=0; pz=0; radius=60;
@@ -1061,9 +1231,16 @@ function init() {
 
 function resetGameMode() {
     is3DMode = modeToggle.checked;
+    isGameOver = false;
+    gameOverScreen.style.display = 'none';
+    score = 0;
+    scoreEl.innerText = 0;
     
+    // Reset generation state
     planets = [];
     generatedChunks.clear();
+    lastChunk = {x: -999, y: -999, z: -999}; // Force re-gen
+    
     planetMeshes.forEach(mesh => scene.remove(mesh));
     planetMeshes.clear();
     
@@ -1088,9 +1265,10 @@ function resetGameMode() {
         c2d.style.display = 'block';
         steerHint.style.display = 'none';
 
-        player.runSpeed = 4.0;
-        speedSlider.value = 4.0;
-        speedVal.innerText = 4.0;
+        // HALVED SPEED FOR 2D MODE (Was 4.0)
+        player.runSpeed = 2.0;
+        speedSlider.value = 2.0;
+        speedVal.innerText = 2.0;
     }
 
     generateWorld(0, 0, 0);
@@ -1121,6 +1299,8 @@ speedSlider.addEventListener('input', () => {
 });
 
 function update() {
+    if (isGameOver) return;
+    
     gameTime++;
     player.update();
     generateWorld(player.pos.x, player.pos.y, player.pos.z);
@@ -1198,6 +1378,7 @@ function draw2D() {
 }
 
 function handleJump() {
+    if (isGameOver) return;
     if (player.state === 'orbiting') player.jump();
 }
 
@@ -1213,11 +1394,11 @@ window.addEventListener('keyup', (e) => {
 });
 
 window.addEventListener('mousedown', (e) => {
-    if (e.target.tagName !== 'INPUT') handleJump();
+    if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON') handleJump();
 });
 
 window.addEventListener('touchstart', (e) => {
-    if (e.target.tagName !== 'INPUT') {
+    if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON') {
         e.preventDefault();
         handleJump();
     }
