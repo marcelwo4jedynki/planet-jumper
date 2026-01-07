@@ -168,8 +168,9 @@
             <input type="range" id="distSlider" min="500" max="4000" step="100" value="1800">
         </label>
         <label style="font-size:12px">
-            Density: <span id="densityVal">Normal</span>
-            <input type="range" id="densitySlider" min="0" max="2" step="0.1" value="1.0">
+            Density: <span id="densityVal">1.00</span>
+            <!-- UPDATED: More precise step -->
+            <input type="range" id="densitySlider" min="0" max="2" step="0.01" value="1.0">
         </label>
         <label style="font-size:12px">
             Flyby Radius: <span id="flybyVal">1.25x</span>
@@ -326,13 +327,14 @@ let coinGeometry, coinMaterial;
 
 // Text Burst
 let floatingTexts = [];
+let centralExplosions = []; // NEW: Exploding text for streaks
 
 // Optimization: Shared Geometries
 let sharedSphereGeo;
 
 // --- CUSTOM SHADERS ---
 
-// 1. Planet Shader (5 Color Biome + Danger/Bonus pulse + Distance Fog)
+// UPDATED: Planet Shader (8 Color Biome for smoother/richer noise maps)
 const planetVertexShader = `
 varying vec3 vWorldPosition;
 varying vec3 vNormal;
@@ -350,6 +352,10 @@ uniform vec3 color2;
 uniform vec3 color3;
 uniform vec3 color4;
 uniform vec3 color5;
+// ADDED: Extra colors for more variety
+uniform vec3 color6;
+uniform vec3 color7;
+uniform vec3 color8;
 
 uniform vec3 blinkColor;
 uniform float blinkStrength;
@@ -430,15 +436,29 @@ void main() {
 
     vec3 finalColor;
     
-    // 5-Color Biome Stepping
-    if (n < 0.3) {
-        finalColor = mix(color1, color2, smoothstep(0.2, 0.3, n));
-    } else if (n < 0.5) {
-        finalColor = mix(color2, color3, smoothstep(0.4, 0.5, n));
-    } else if (n < 0.7) {
-        finalColor = mix(color3, color4, smoothstep(0.6, 0.7, n));
+    // UPDATED: 8-Color Biome Stepping logic
+    // We map 0.0-1.0 range to 8 colors
+    // 0.0 - 0.125 : c1-c2
+    // 0.125 - 0.25: c2-c3 etc
+    
+    float stepSize = 0.125; // 1.0 / 8.0
+    
+    if (n < stepSize) {
+        finalColor = mix(color1, color2, smoothstep(0.0, stepSize, n));
+    } else if (n < stepSize * 2.0) {
+        finalColor = mix(color2, color3, smoothstep(stepSize, stepSize * 2.0, n));
+    } else if (n < stepSize * 3.0) {
+        finalColor = mix(color3, color4, smoothstep(stepSize * 2.0, stepSize * 3.0, n));
+    } else if (n < stepSize * 4.0) {
+        finalColor = mix(color4, color5, smoothstep(stepSize * 3.0, stepSize * 4.0, n));
+    } else if (n < stepSize * 5.0) {
+        finalColor = mix(color5, color6, smoothstep(stepSize * 4.0, stepSize * 5.0, n));
+    } else if (n < stepSize * 6.0) {
+        finalColor = mix(color6, color7, smoothstep(stepSize * 5.0, stepSize * 6.0, n));
+    } else if (n < stepSize * 7.0) {
+        finalColor = mix(color7, color8, smoothstep(stepSize * 6.0, stepSize * 7.0, n));
     } else {
-        finalColor = mix(color4, color5, smoothstep(0.8, 0.9, n));
+        finalColor = color8; 
     }
 
     vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
@@ -783,32 +803,77 @@ function createFloatingText(x, y, z, text, color = "#ffff66") {
 }
 
 function updateFloatingTexts() {
+    // Normal floating texts
     for (let i = floatingTexts.length - 1; i >= 0; i--) {
         const t = floatingTexts[i];
         t.life -= 0.015;
         t.offset += 1; // Rise up
         if (t.life <= 0) floatingTexts.splice(i, 1);
     }
+    
+    // Central Explosion texts
+    for (let i = centralExplosions.length - 1; i >= 0; i--) {
+        const t = centralExplosions[i];
+        t.life -= 0.02; // Fade faster
+        t.scale += 0.02; // Expand
+        if (t.life <= 0) centralExplosions.splice(i, 1);
+    }
+}
+
+function triggerExplosion(text) {
+    centralExplosions.push({
+        text: text,
+        life: 1.0,
+        scale: 1.0,
+        rotation: (Math.random() - 0.5) * 0.2
+    });
 }
 
 function drawFloatingTexts(ctx, camX, camY) {
-    ctx.font = "bold 20px 'Segoe UI', Arial";
     ctx.textAlign = "center";
     
+    // 1. World Space Floating Texts
+    ctx.font = "bold 20px 'Segoe UI', Arial";
     floatingTexts.forEach(t => {
         const vec = new THREE.Vector3(t.x, t.y, t.z);
         vec.project(camera3D);
-        const sx = (vec.x * 0.5 + 0.5) * width;
-        const sy = (-(vec.y * 0.5) + 0.5) * height;
+        
+        // Check if point is roughly in front of camera
+        if (vec.z < 1) {
+            const sx = (vec.x * 0.5 + 0.5) * width;
+            const sy = (-(vec.y * 0.5) + 0.5) * height;
 
-        // Fade out
-        ctx.globalAlpha = Math.max(0, t.life);
-        ctx.fillStyle = t.color;
-        ctx.strokeStyle = `rgba(0, 0, 0, ${t.life})`;
-        ctx.lineWidth = 4;
-        ctx.strokeText(t.text, sx, sy - t.offset);
-        ctx.fillText(t.text, sx, sy - t.offset);
-        ctx.globalAlpha = 1.0;
+            ctx.globalAlpha = Math.max(0, t.life);
+            ctx.fillStyle = t.color;
+            ctx.strokeStyle = `rgba(0, 0, 0, ${t.life})`;
+            ctx.lineWidth = 4;
+            ctx.strokeText(t.text, sx, sy - t.offset);
+            ctx.fillText(t.text, sx, sy - t.offset);
+            ctx.globalAlpha = 1.0;
+        }
+    });
+
+    // 2. Screen Space Exploding Texts
+    centralExplosions.forEach(t => {
+        ctx.save();
+        ctx.translate(width/2, height/2);
+        ctx.rotate(t.rotation);
+        ctx.scale(t.scale, t.scale);
+        
+        const fontSize = 40 + (1.0 - t.life) * 10;
+        ctx.font = `900 ${fontSize}px 'Segoe UI', Arial`;
+        
+        ctx.globalAlpha = t.life;
+        ctx.fillStyle = "#ffaa00";
+        ctx.strokeStyle = "white";
+        ctx.lineWidth = 2;
+        ctx.shadowColor = "rgba(255, 170, 0, 0.8)";
+        ctx.shadowBlur = 20;
+        
+        ctx.strokeText(t.text, 0, 0);
+        ctx.fillText(t.text, 0, 0);
+        
+        ctx.restore();
     });
 }
 
@@ -953,6 +1018,11 @@ function updateVisuals3D() {
                         color3: { value: new THREE.Color(p.colors[2]) },
                         color4: { value: new THREE.Color(p.colors[3]) },
                         color5: { value: new THREE.Color(p.colors[4]) },
+                        // ADDED: Extra color uniforms
+                        color6: { value: new THREE.Color(p.colors[5]) },
+                        color7: { value: new THREE.Color(p.colors[6]) },
+                        color8: { value: new THREE.Color(p.colors[7]) },
+                        
                         blinkColor: { value: new THREE.Color(0,0,0) },
                         blinkStrength: { value: 0.0 },
                         fogColor: { value: new THREE.Color(0x050510) },
@@ -996,50 +1066,79 @@ function updateVisuals3D() {
 
 // --- Classes ---
 
+// UPDATED: Predefined Vivid Palettes
+const VIBRANT_PALETTES = [
+    [0xEF476F, 0xFFD166, 0x06D6A0, 0x118AB2, 0x073B4C], // Tropical
+    [0x264653, 0x2A9D8F, 0xE9C46A, 0xF4A261, 0xE76F51], // Warm Earth
+    [0x003049, 0xD62828, 0xF77F00, 0xFCBF49, 0xEAE2B7], // Retro
+    [0xFFBE0B, 0xFB5607, 0xFF006E, 0x8338EC, 0x3A86FF], // Neon
+    [0x9B5DE5, 0xF15BB5, 0xFEE440, 0x00BBF9, 0x00F5D4], // Cyber
+    [0x001219, 0x005F73, 0x0A9396, 0x94D2BD, 0xE9D8A6], // Deep Ocean
+    [0x1B263B, 0x415A77, 0x778DA9, 0xE0E1DD, 0xFFFFFF], // Ice
+    [0x3F37C9, 0x4361EE, 0x4895EF, 0x4CC9F0, 0x7209B7], // Blue/Purple
+    [0xFF595E, 0xFFCA3A, 0x8AC926, 0x1982C4, 0x6A4C93]  // Rainbow
+];
+
 class Planet {
     constructor(x, y, z, radius, type) {
         this.x = x; this.y = y; this.z = z;
         this.radius = radius;
         this.mass = radius * radius * 0.5;
-        this.baseColor = this.generateColor(type);
-        this.colors = this.generateBiomeColors(this.baseColor); 
+        
+        // ADDED: "0-3 extra colors" logic
+        // Standard is 5. We allow up to 8.
+        const extraColors = Math.floor(Math.random() * 4); // 0, 1, 2, or 3
+        const totalColors = 5 + extraColors;
+        
+        this.colors = this.generateBiomeColors(totalColors); 
         this.visited = false;
         this.passed = false; // For flyby logic
         this.specialType = 'none'; // 'none', 'trap', 'bonus'
         this.coins = this.generateCoins();
     }
     
-    generateColor(val) {
-        const r = Math.floor(100 + val * 155);
-        const g = Math.floor(50 + Math.random() * 100);
-        const b = Math.floor(100 + Math.random() * 155);
-        return { r, g, b, str: `rgb(${r},${g},${b})` };
-    }
-    
-    generateBiomeColors(base) {
-        const c1 = new THREE.Color(`rgb(${base.r}, ${base.g}, ${base.b})`);
-        const c2 = c1.clone().multiplyScalar(0.8);
-        const c3 = c1.clone().multiplyScalar(1.2); 
-        const c4 = c1.clone().offsetHSL(0.05, 0, -0.1);
-        const c5 = c1.clone().offsetHSL(-0.05, 0, 0.2);
-
-        return [c1.getStyle(), c2.getStyle(), c3.getStyle(), c4.getStyle(), c5.getStyle()];
+    // UPDATED: Use predefined palettes instead of random generation
+    generateBiomeColors(count) {
+        // Pick random palette
+        const palette = VIBRANT_PALETTES[Math.floor(Math.random() * VIBRANT_PALETTES.length)];
+        const resultColors = [];
+        
+        // We need 'count' distinct colors for the planet, derived from the palette.
+        // If palette is smaller than count, we cycle or interpolate.
+        // We also want to map this to exactly 8 slots for the shader.
+        
+        // 1. Generate 'count' distinct colors from palette
+        const generated = [];
+        for (let i = 0; i < count; i++) {
+            // Simple cycle for now, maybe add slight noise later
+            const baseHex = palette[i % palette.length];
+            const c = new THREE.Color(baseHex);
+            
+            // Add slight randomness so planets with same palette look different
+            c.offsetHSL(0, (Math.random()-0.5)*0.1, (Math.random()-0.5)*0.1);
+            generated.push(c.getStyle());
+        }
+        
+        // 2. Fill the 8 shader slots
+        // If we have 5 colors, slots 1-5 are unique.
+        // Slots 6,7,8 should probably just repeat the last color (highest elevation)
+        // so the top of the mountain is solid.
+        for (let i = 0; i < 8; i++) {
+            if (i < generated.length) {
+                resultColors.push(generated[i]);
+            } else {
+                resultColors.push(generated[generated.length - 1]);
+            }
+        }
+        return resultColors;
     }
 
     generateCoins() {
         const coins = [];
-        // Approximate "every triangle of virtual icosahedron" (frequency 8 has ~1280 faces, 
-        // 64x64 sphere has ~8000 faces). 
-        // User requested 1/500 chance per triangle. 
-        // Let's assume a standard mesh of ~4000 triangles for a planet this size.
-        // 4000 / 500 = 8 coins avg.
-        // We will distribute points uniformly using Fibonacci Sphere, then filter by chance.
-        
-        const numPoints = 4000; // Representation of triangle count
+        const numPoints = 4000; 
         const phi = Math.PI * (3.0 - Math.sqrt(5.0));
 
         for (let i = 0; i < numPoints; i++) {
-            // 1/500 chance
             if (Math.random() < (1.0/500.0)) {
                 const y = 1 - (i / (numPoints - 1)) * 2;
                 const radiusAtY = Math.sqrt(1 - y * y);
@@ -1195,6 +1294,13 @@ class Player {
         flybyStreak++;
         updateStreakUI();
         createFloatingText(p.x, p.y + p.radius + 20, p.z, "CLOSE CALL! x" + flybyStreak, "#ffaa00");
+        
+        // UPDATED: Trigger huge explosion text on screen
+        if (flybyStreak > 1) {
+            triggerExplosion(`STREAK x${flybyStreak}!`);
+        } else {
+            triggerExplosion("NICE FLYBY!");
+        }
     }
 
     jump() {
@@ -1265,6 +1371,7 @@ class Player {
             if (planet.specialType === 'bonus') {
                 points *= 2;
                 createFloatingText(this.pos.x, this.pos.y, this.pos.z, "BONUS! +" + points, "#00ff00");
+                triggerExplosion("BONUS PLANET!");
             } else {
                 createFloatingText(this.pos.x, this.pos.y, this.pos.z, "+" + points);
             }
@@ -1462,6 +1569,7 @@ function resetGameMode() {
     flybyStreak = 0;
     scoreEl.innerText = 0;
     updateStreakUI();
+    centralExplosions = [];
     
     planets = [];
     generatedChunks.clear();
@@ -1519,11 +1627,11 @@ distSlider.addEventListener('input', () => {
     }
 });
 densitySlider.addEventListener('input', () => {
-    // 0 = sparse, 1 = normal, 2 = dense
+    // UPDATED: Precision 0.01
     const val = parseFloat(densitySlider.value);
     WORLD_DENSITY = val;
-    const txt = val < 0.5 ? "Sparse" : (val > 1.5 ? "Dense" : "Normal");
-    densityVal.innerText = txt;
+    // Show 2 decimals
+    densityVal.innerText = val.toFixed(2);
 });
 flybySlider.addEventListener('input', () => {
     FLYBY_RADIUS_MULT = parseFloat(flybySlider.value);
