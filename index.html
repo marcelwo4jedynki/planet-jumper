@@ -21,12 +21,12 @@
             left: 0;
         }
         #gameCanvas {
-            z-index: 1; /* Used for 2D game AND 3D text overlay */
+            z-index: 1; /* Used for HUD and text overlay */
             pointer-events: none; /* Let clicks pass through to 3D canvas if needed */
         }
         #threeCanvas {
             z-index: 0;
-            display: none;
+            display: block; /* Always visible now */
         }
         #ui {
             position: absolute;
@@ -125,16 +125,13 @@
 <body>
 
 <div id="ui">
-    <h1>PLANET JUMPER</h1>
+    <h1>PLANET JUMPER 3D</h1>
     <p>Score: <span id="score">0</span></p>
     <p>Velocity: <span id="vel">0</span></p>
     <p>Coordinates: <span id="coords">0, 0, 0</span></p>
 </div>
 
 <div id="settings">
-    <label>
-        <input type="checkbox" id="mode3dToggle"> 3D Mode
-    </label>
     <label>
         <input type="checkbox" id="advancedToggle"> Advanced Mode
     </label>
@@ -148,7 +145,7 @@
 
 <div id="controls-hint">
     <span id="hint-text">Tap / Click to Jump</span>
-    <div id="steer-hint" style="display:none; margin-top:5px; font-size: 12px; color: #00ffff;">
+    <div id="steer-hint" style="margin-top:5px; font-size: 12px; color: #00ffff;">
         Use <span class="key">←</span> <span class="key">→</span> to steer orbit
     </div>
 </div>
@@ -159,6 +156,7 @@
     <button onclick="resetGameMode()">RESTART</button>
 </div>
 
+<!-- 2D Canvas is now used ONLY for HUD/Text Overlay -->
 <canvas id="gameCanvas"></canvas>
 
 <script>
@@ -225,7 +223,6 @@ const ctx = canvas.getContext('2d');
 const scoreEl = document.getElementById('score');
 const velEl = document.getElementById('vel');
 const coordsEl = document.getElementById('coords');
-const modeToggle = document.getElementById('mode3dToggle');
 const advancedToggle = document.getElementById('advancedToggle');
 const advancedControls = document.getElementById('advancedControls');
 const speedSlider = document.getElementById('speedSlider');
@@ -236,18 +233,13 @@ const gameOverScreen = document.getElementById('gameOverScreen');
 let width, height;
 const GRAVITY = 0.5;
 const MAX_GRAVITY_DIST = 800;
-
-// Increased grid size for much wider spread
-const GRID_SIZE = 1000; 
+const GRID_SIZE = 400;
 
 // Game State
 let planets = [];
-let stars = [];
 let player;
-let camera = { x: 0, y: 0, z: 200 }; 
 let score = 0;
 let gameTime = 0;
-let is3DMode = false;
 let inputState = { left: false, right: false };
 let isGameOver = false;
 
@@ -486,42 +478,34 @@ function init3D() {
     starPoints = new THREE.Points(starGeometry, starMat);
     scene.add(starPoints);
 
-    // --- REIMPLEMENTED HEXAGON FROM SCRATCH (BUFFER GEOMETRY) ---
-    // Manually define vertices for a hexagon ring to be 100% "pure code"
+    // --- REIMPLEMENTED HEXAGON FROM SCRATCH ---
+    // Pure code definition of a Hexagon Ring
     const hexRadius = 2.5;
     const hexThickness = 0.5;
-    const hexInnerR = hexRadius - hexThickness;
-    const hexGeo = new THREE.BufferGeometry();
+    const hexPts = [];
+    const hexInnerPts = [];
     
-    // We need 6 quads (12 triangles) to make a ring. 
-    // Each quad has 2 triangles (6 vertices). Total 36 vertices.
-    // Or we can index them. Let's use simple vertex soup for clarity.
-    const hexVertices = [];
-    
+    // Generate 6 points
     for (let i = 0; i < 6; i++) {
-        const theta1 = (i / 6) * Math.PI * 2;
-        const theta2 = ((i + 1) / 6) * Math.PI * 2;
-        
-        // Outer Points
-        const o1x = Math.cos(theta1) * hexRadius; const o1y = Math.sin(theta1) * hexRadius;
-        const o2x = Math.cos(theta2) * hexRadius; const o2y = Math.sin(theta2) * hexRadius;
-        
-        // Inner Points
-        const i1x = Math.cos(theta1) * hexInnerR; const i1y = Math.sin(theta1) * hexInnerR;
-        const i2x = Math.cos(theta2) * hexInnerR; const i2y = Math.sin(theta2) * hexInnerR;
-        
-        // Triangle 1: O1, I1, O2
-        hexVertices.push(o1x, o1y, 0);
-        hexVertices.push(i1x, i1y, 0);
-        hexVertices.push(o2x, o2y, 0);
-        
-        // Triangle 2: I1, I2, O2
-        hexVertices.push(i1x, i1y, 0);
-        hexVertices.push(i2x, i2y, 0);
-        hexVertices.push(o2x, o2y, 0);
+        const angle = (i / 6) * Math.PI * 2;
+        hexPts.push(new THREE.Vector2(Math.cos(angle) * hexRadius, Math.sin(angle) * hexRadius));
+        hexInnerPts.push(new THREE.Vector2(Math.cos(angle) * (hexRadius - hexThickness), Math.sin(angle) * (hexRadius - hexThickness)));
     }
     
-    hexGeo.setAttribute('position', new THREE.Float32BufferAttribute(hexVertices, 3));
+    // Create Shape
+    const hexShape = new THREE.Shape();
+    hexShape.moveTo(hexPts[0].x, hexPts[0].y);
+    for (let i = 1; i < 6; i++) hexShape.lineTo(hexPts[i].x, hexPts[i].y);
+    hexShape.closePath();
+    
+    const hexHole = new THREE.Path();
+    hexHole.moveTo(hexInnerPts[0].x, hexInnerPts[0].y);
+    for (let i = 1; i < 6; i++) hexHole.lineTo(hexInnerPts[i].x, hexInnerPts[i].y);
+    hexHole.closePath();
+    
+    hexShape.holes.push(hexHole);
+    
+    const customHexGeo = new THREE.ShapeGeometry(hexShape);
 
     const hexMat = new THREE.MeshBasicMaterial({ 
         color: 0x00aaff, 
@@ -529,16 +513,13 @@ function init3D() {
         opacity: 0.8, 
         side: THREE.DoubleSide,
         depthWrite: false,
-        depthTest: false, // FORCE VISIBILITY through walls
         blending: THREE.AdditiveBlending
     });
-    hexParticles = new THREE.InstancedMesh(hexGeo, hexMat, hexCount);
+    hexParticles = new THREE.InstancedMesh(customHexGeo, hexMat, hexCount);
     hexParticles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     for(let i=0; i<hexCount; i++) {
         hexData.push({ life: 0, x:0, y:0, z:0, dirX:0, dirY:0, dirZ:0 });
     }
-    // Set render order high to draw on top of planet surface
-    hexParticles.renderOrder = 999;
     scene.add(hexParticles);
 
     // Fire Particles (Re-entry)
@@ -579,8 +560,6 @@ function updateHexParticles(playerPos, currentPlanet) {
         if (h.life <= 0) {
             if (Math.random() < 0.2) { 
                 h.life = 1.0;
-                
-                // Spawn AT PLAYER POS first
                 h.x = playerPos.x; 
                 h.y = playerPos.y; 
                 h.z = playerPos.z;
@@ -593,12 +572,18 @@ function updateHexParticles(playerPos, currentPlanet) {
                 
                 // Direction normal
                 h.dirX = dx/len; h.dirY = dy/len; h.dirZ = dz/len;
+                
+                // Emission: From bottom of ship
+                const startOffset = 3.0; 
+                h.x += h.dirX * startOffset;
+                h.y += h.dirY * startOffset;
+                h.z += h.dirZ * startOffset;
             }
         }
         
         if (h.life > 0) {
             h.life -= 0.03;
-            // Move downwards (towards planet)
+            // Move downwards
             const speed = 1.5;
             h.x += h.dirX * speed;
             h.y += h.dirY * speed;
@@ -713,15 +698,11 @@ function drawFloatingTexts(ctx, camX, camY) {
     floatingTexts.forEach(t => {
         let sx, sy;
         
-        if (is3DMode) {
-            const vec = new THREE.Vector3(t.x, t.y, t.z);
-            vec.project(camera3D);
-            sx = (vec.x * 0.5 + 0.5) * width;
-            sy = (-(vec.y * 0.5) + 0.5) * height;
-        } else {
-            sx = t.x - camX;
-            sy = t.y - camY;
-        }
+        // Only 3D Projection logic needed now
+        const vec = new THREE.Vector3(t.x, t.y, t.z);
+        vec.project(camera3D);
+        sx = (vec.x * 0.5 + 0.5) * width;
+        sy = (-(vec.y * 0.5) + 0.5) * height;
 
         ctx.fillStyle = `rgba(255, 255, 100, ${t.life})`;
         ctx.strokeStyle = `rgba(0, 0, 0, ${t.life * 0.5})`;
@@ -917,56 +898,6 @@ class Planet {
 
         return [c1.getStyle(), c2.getStyle(), c3.getStyle(), c4.getStyle(), c5.getStyle()];
     }
-    
-    draw(ctx, camX, camY) {
-        ctx.beginPath();
-        ctx.arc(this.x - camX, this.y - camY, this.radius * 1.2, 0, Math.PI * 2);
-        ctx.fillStyle = this.atmosphereColor;
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(this.x - camX, this.y - camY, this.radius, 0, Math.PI * 2);
-        const grad = ctx.createRadialGradient(
-            this.x - camX - this.radius * 0.3, 
-            this.y - camY - this.radius * 0.3, 
-            this.radius * 0.1, 
-            this.x - camX, 
-            this.y - camY, 
-            this.radius
-        );
-        grad.addColorStop(0, this.baseColor.str);
-        grad.addColorStop(1, 'rgba(10,10,20,1)'); 
-        ctx.fillStyle = grad;
-        ctx.fill();
-
-        if (this.visited) {
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.arc(this.x - camX, this.y - camY, this.radius + 5, 0, Math.PI * 2);
-            ctx.stroke();
-        }
-
-        // Draw Special Blinking in 2D
-        if (this.specialType !== 'none') {
-            const time = Date.now() * 0.005;
-            const alpha = (Math.sin(time) + 1) * 0.3; 
-            ctx.lineWidth = 4;
-            if (this.specialType === 'trap') {
-                ctx.strokeStyle = `rgba(255, 0, 0, ${alpha})`;
-                ctx.shadowColor = 'red';
-                ctx.shadowBlur = 20;
-            } else {
-                ctx.strokeStyle = `rgba(0, 255, 0, ${alpha})`;
-                ctx.shadowColor = 'green';
-                ctx.shadowBlur = 20;
-            }
-            ctx.beginPath();
-            ctx.arc(this.x - camX, this.y - camY, this.radius + 10, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-        }
-    }
 }
 
 class Player {
@@ -1000,12 +931,10 @@ class Player {
         if (!this.currentPlanet) return;
         const p = this.currentPlanet;
 
-        if (is3DMode) {
-            const normal = V3.norm(V3.sub(this.pos, p));
-            const steerSpeed = 0.03;
-            if (inputState.left) this.orbitAxis = V3.norm(V3.rotate(this.orbitAxis, normal, steerSpeed));
-            if (inputState.right) this.orbitAxis = V3.norm(V3.rotate(this.orbitAxis, normal, -steerSpeed));
-        }
+        const normal = V3.norm(V3.sub(this.pos, p));
+        const steerSpeed = 0.03;
+        if (inputState.left) this.orbitAxis = V3.norm(V3.rotate(this.orbitAxis, normal, steerSpeed));
+        if (inputState.right) this.orbitAxis = V3.norm(V3.rotate(this.orbitAxis, normal, -steerSpeed));
 
         const omega = this.runSpeed / p.radius;
         const relPos = V3.sub(this.pos, p);
@@ -1014,8 +943,8 @@ class Player {
         
         this.angle = Math.atan2(newRelPos.y, newRelPos.x);
 
-        const normal = V3.norm(newRelPos);
-        const tangent = V3.norm(V3.cross(this.orbitAxis, normal));
+        const normal2 = V3.norm(newRelPos);
+        const tangent = V3.norm(V3.cross(this.orbitAxis, normal2));
         this.vel = V3.scale(tangent, this.runSpeed);
     }
 
@@ -1037,11 +966,6 @@ class Player {
 
         this.vel = V3.add(this.vel, gravity);
         this.pos = V3.add(this.pos, this.vel);
-        
-        if (!is3DMode) {
-            this.pos.z = 0;
-            this.vel.z = 0;
-        }
     }
 
     jump() {
@@ -1158,8 +1082,8 @@ function generateWorld(px, py, pz) {
 
     // Reduced radius for render distance halving (5 -> 3)
     const rad = 3; 
-    const zMin = is3DMode ? gz - rad : 0;
-    const zMax = is3DMode ? gz + rad : 0;
+    const zMin = gz - rad;
+    const zMax = gz + rad;
 
     for (let x = gx - rad; x <= gx + rad; x++) {
         for (let y = gy - rad; y <= gy + rad; y++) {
@@ -1186,36 +1110,49 @@ function generateChunk(gx, gy, gz) {
         const cy = gy * GRID_SIZE + GRID_SIZE / 2;
         const cz = gz * GRID_SIZE + GRID_SIZE / 2;
         
-        // --- OVERLAP FIX: CONSTRAINED OFFSET ---
-        // Constraint: Planet stays within a safe zone to never overlap neighbor cells
-        // Max Radius approx 140. GRID_SIZE 1000. 
-        // Max offset range must satisfy: offset + radius < GRID_SIZE/2
-        // Safe offset = 500 - 150 - buffer(50) = 300
-        const offsetRange = 300; 
-        
-        // Use deterministic pseudo-random from coords
+        // More random placement logic (not looking like a grid)
+        // Offset up to 80% of grid size instead of small jitter
+        const offsetRange = GRID_SIZE * 0.8;
         const ox = (Math.sin(gx * 12.9898 + gy * 78.233 + gz * 37.719) * 0.5) * offsetRange;
         const oy = (Math.cos(gy * 23.381 + gz * 11.21 + gx * 4.91) * 0.5) * offsetRange;
         const oz = (Math.sin(gz * 91.1 + gx * 7.33 + gy * 19.8) * 0.5) * offsetRange;
 
         let px = cx + ox;
         let py = cy + oy;
-        let pz = is3DMode ? cz + oz : 0;
+        let pz = cz + oz;
         
         // Variable planet sizes based on noise
         // range: 20 to 120
         let radius = 20 + Math.abs(noiseVal) * 100 + rnd * 20;
-        
-        // Clamp radius for safety
-        if (radius > 150) radius = 150;
 
         if (gx === 0 && gy === 0 && gz === 0) {
             px=0; py=0; pz=0; radius=60;
         }
 
-        const p = new Planet(px, py, pz, radius, noiseVal);
-        if (gx===0 && gy===0 && gz===0) p.visited = true;
-        planets.push(p);
+        // --- NEW COLLISION CHECK ---
+        // Check strict overlap against existing planets before spawning
+        // We only check against planets in reasonable memory. 
+        // For standard "jumper" speeds, checking the array is fast enough.
+        let overlaps = false;
+        const safeBuffer = 50; // extra space between planets
+        
+        // Optimization: Checking against ALL planets might get slow over time,
+        // but typically the count is < 500 for a play session. 
+        for(let i=0; i<planets.length; i++) {
+            const other = planets[i];
+            const distSq = (px-other.x)**2 + (py-other.y)**2 + (pz-other.z)**2;
+            const minDist = radius + other.radius + safeBuffer;
+            if (distSq < minDist * minDist) {
+                overlaps = true;
+                break;
+            }
+        }
+        
+        if (!overlaps) {
+            const p = new Planet(px, py, pz, radius, noiseVal);
+            if (gx===0 && gy===0 && gz===0) p.visited = true;
+            planets.push(p);
+        }
     }
 }
 
@@ -1230,7 +1167,6 @@ function init() {
 }
 
 function resetGameMode() {
-    is3DMode = modeToggle.checked;
     isGameOver = false;
     gameOverScreen.style.display = 'none';
     score = 0;
@@ -1248,28 +1184,19 @@ function resetGameMode() {
     
     const c3d = document.getElementById('threeCanvas');
     const c2d = document.getElementById('gameCanvas');
-    if (is3DMode) {
-        c3d.style.display = 'block';
-        c2d.style.display = 'block'; 
-        steerHint.style.display = 'block';
-        
-        player.runSpeed = 0.5;
-        speedSlider.value = 0.5;
-        speedVal.innerText = 0.5;
-        
-        // Reset cam smoothers
-        camPosSmooth.set(0,0,500);
-        camUpSmooth.set(0,1,0);
-    } else {
-        c3d.style.display = 'none';
-        c2d.style.display = 'block';
-        steerHint.style.display = 'none';
-
-        // HALVED SPEED FOR 2D MODE (Was 4.0)
-        player.runSpeed = 2.0;
-        speedSlider.value = 2.0;
-        speedVal.innerText = 2.0;
-    }
+    
+    // Always 3D Mode
+    c3d.style.display = 'block';
+    c2d.style.display = 'block'; 
+    steerHint.style.display = 'block';
+    
+    player.runSpeed = 0.5;
+    speedSlider.value = 0.5;
+    speedVal.innerText = 0.5;
+    
+    // Reset cam smoothers
+    camPosSmooth.set(0,0,500);
+    camUpSmooth.set(0,1,0);
 
     generateWorld(0, 0, 0);
 
@@ -1289,7 +1216,6 @@ function resetGameMode() {
     }
 }
 
-modeToggle.addEventListener('change', resetGameMode);
 advancedToggle.addEventListener('change', () => {
     advancedControls.style.display = advancedToggle.checked ? 'block' : 'none';
 });
@@ -1309,72 +1235,13 @@ function update() {
     coordsEl.innerText = `${Math.round(player.pos.x)}, ${Math.round(player.pos.y)}, ${Math.round(player.pos.z)}`;
 
     updateFloatingTexts();
-    if (is3DMode) updateVisuals3D();
+    updateVisuals3D();
 }
 
-function draw2D() {
-    if (is3DMode) {
-        ctx.clearRect(0, 0, width, height);
-        drawFloatingTexts(ctx, 0, 0);
-        return;
-    }
-    
-    ctx.fillStyle = '#050510';
-    ctx.fillRect(0, 0, width, height);
-
-    if (!stars.length) {
-        for(let i=0; i<100; i++) stars.push({x:Math.random()*width, y:Math.random()*height, a:Math.random()});
-    }
-    ctx.fillStyle = 'white';
-    stars.forEach(s => {
-        ctx.globalAlpha = s.a;
-        ctx.fillRect((s.x - camera.x*0.1)%width, (s.y - camera.y*0.1)%height, 2, 2);
-    });
-    ctx.globalAlpha = 1;
-
-    const targetX = player.pos.x - width/2;
-    const targetY = player.pos.y - height/2;
-    camera.x += (targetX - camera.x) * 0.1;
-    camera.y += (targetY - camera.y) * 0.1;
-
-    ctx.save();
-    ctx.translate(-camera.x, -camera.y);
-
-    planets.forEach(p => {
-        if (Math.abs(p.x - player.pos.x) < width && Math.abs(p.y - player.pos.y) < height) {
-            p.draw(ctx, 0, 0); 
-        }
-    });
-
-    // 2D Player
-    ctx.save();
-    ctx.translate(player.pos.x, player.pos.y);
-    let rot = player.angle + Math.PI/2;
-    if (player.state === 'flying') rot = Math.atan2(player.vel.y, player.vel.x) + Math.PI/2;
-    ctx.rotate(rot);
-
-    ctx.fillStyle = player.color;
-    ctx.beginPath();
-    ctx.moveTo(0, -player.height);
-    ctx.lineTo(-player.width/2, player.height/2);
-    ctx.lineTo(player.width/2, player.height/2);
-    ctx.closePath();
-    ctx.fill();
-
-    if (player.state === 'flying') {
-        ctx.beginPath();
-        ctx.moveTo(-3, player.height/2);
-        ctx.lineTo(3, player.height/2);
-        ctx.lineTo(0, player.height/2 + Math.random() * 10);
-        ctx.fillStyle = '#ffaa00';
-        ctx.fill();
-    }
-    ctx.restore();
-    
-    // Draw text in 2D world space relative to cam
-    drawFloatingTexts(ctx, camera.x, camera.y);
-    
-    ctx.restore();
+function drawHUD() {
+    // Just clear the 2D canvas and draw the HUD elements
+    ctx.clearRect(0, 0, width, height);
+    drawFloatingTexts(ctx, 0, 0);
 }
 
 function handleJump() {
@@ -1406,7 +1273,7 @@ window.addEventListener('touchstart', (e) => {
 
 function loop() {
     update();
-    draw2D();
+    drawHUD();
     requestAnimationFrame(loop);
 }
 
