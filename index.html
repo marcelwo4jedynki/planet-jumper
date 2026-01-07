@@ -26,7 +26,7 @@
         }
         #threeCanvas {
             z-index: 0;
-            display: block; /* Always visible now */
+            display: block; 
         }
         #ui {
             position: absolute;
@@ -34,6 +34,9 @@
             left: 20px;
             z-index: 10;
             pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
         }
         #settings {
             position: absolute;
@@ -49,14 +52,30 @@
             gap: 5px;
         }
         h1 {
-            margin: 0;
+            margin: 0 0 10px 0;
             font-size: 24px;
             text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+            letter-spacing: 2px;
         }
         p {
-            margin: 5px 0;
+            margin: 0;
             font-size: 14px;
-            color: #aaa;
+            color: #ccc;
+            text-shadow: 1px 1px 2px black;
+        }
+        .stat-label {
+            color: #88aaff;
+            font-weight: bold;
+            display: inline-block;
+            width: 90px;
+        }
+        #streak-container {
+            margin-top: 5px;
+            font-size: 18px;
+            color: #ffaa00;
+            font-weight: bold;
+            opacity: 0; /* Hidden by default */
+            transition: opacity 0.5s;
         }
         #controls-hint {
             position: absolute;
@@ -93,12 +112,15 @@
         input[type="range"] {
             margin-left: 10px;
             cursor: pointer;
+            width: 100px;
         }
         #advancedControls {
             margin-top: 5px; 
             padding-left: 5px; 
             border-left: 2px solid #444;
             display: none;
+            flex-direction: column;
+            gap: 5px;
         }
         #gameOverScreen {
             position: absolute;
@@ -126,9 +148,10 @@
 
 <div id="ui">
     <h1>PLANET JUMPER 3D</h1>
-    <p>Score: <span id="score">0</span></p>
-    <p>Velocity: <span id="vel">0</span></p>
-    <p>Coordinates: <span id="coords">0, 0, 0</span></p>
+    <p><span class="stat-label">SCORE:</span> <span id="score">0</span></p>
+    <p><span class="stat-label">VELOCITY:</span> <span id="vel">0</span></p>
+    <p><span class="stat-label">POS:</span> <span id="coords">0, 0, 0</span></p>
+    <div id="streak-container">FLYBY STREAK: <span id="streak">0</span></div>
 </div>
 
 <div id="settings">
@@ -137,8 +160,20 @@
     </label>
     <div id="advancedControls">
         <label style="font-size:12px">
-            Speed: <span id="speedVal">0.5</span>
-            <input type="range" id="speedSlider" min="0.1" max="10.0" step="0.1" value="0.5">
+            Speed: <span id="speedVal">1.0</span>
+            <input type="range" id="speedSlider" min="0.1" max="10.0" step="0.1" value="1.0">
+        </label>
+        <label style="font-size:12px">
+            Render Dist: <span id="distVal">1800</span>
+            <input type="range" id="distSlider" min="500" max="4000" step="100" value="1800">
+        </label>
+        <label style="font-size:12px">
+            Density: <span id="densityVal">Normal</span>
+            <input type="range" id="densitySlider" min="0" max="2" step="0.1" value="1.0">
+        </label>
+        <label style="font-size:12px">
+            Flyby Radius: <span id="flybyVal">1.25x</span>
+            <input type="range" id="flybySlider" min="1.05" max="2.0" step="0.05" value="1.25">
         </label>
     </div>
 </div>
@@ -223,10 +258,18 @@ const ctx = canvas.getContext('2d');
 const scoreEl = document.getElementById('score');
 const velEl = document.getElementById('vel');
 const coordsEl = document.getElementById('coords');
+const streakContainer = document.getElementById('streak-container');
+const streakEl = document.getElementById('streak');
 const advancedToggle = document.getElementById('advancedToggle');
 const advancedControls = document.getElementById('advancedControls');
 const speedSlider = document.getElementById('speedSlider');
 const speedVal = document.getElementById('speedVal');
+const distSlider = document.getElementById('distSlider');
+const distVal = document.getElementById('distVal');
+const densitySlider = document.getElementById('densitySlider');
+const densityVal = document.getElementById('densityVal');
+const flybySlider = document.getElementById('flybySlider');
+const flybyVal = document.getElementById('flybyVal');
 const steerHint = document.getElementById('steer-hint');
 const gameOverScreen = document.getElementById('gameOverScreen');
 
@@ -234,17 +277,25 @@ let width, height;
 const GRAVITY = 0.5;
 const MAX_GRAVITY_DIST = 800;
 const GRID_SIZE = 400;
+// Fog/Render Distance
+let RENDER_DIST = 1800;
+let FOG_START = 1000;
+// Density & Flyby Settings
+let WORLD_DENSITY = 1.0;
+let FLYBY_RADIUS_MULT = 1.25;
 
 // Game State
 let planets = [];
 let player;
 let score = 0;
+let flybyStreak = 0;
 let gameTime = 0;
 let inputState = { left: false, right: false };
 let isGameOver = false;
 
 // Optimization: Track last chunk to avoid spamming generation
 let lastChunk = {x: -999, y: -999, z: -999};
+let generatedChunks = new Set(); 
 
 // 3D Engine Globals
 let scene, camera3D, renderer3D, playerMesh3D;
@@ -255,10 +306,9 @@ let camPosSmooth = new THREE.Vector3(0,0,500);
 let camLookAtSmooth = new THREE.Vector3(0,0,0);
 let camUpSmooth = new THREE.Vector3(0,1,0);
 
-
-// Particles
+// Particles & Instancing
 let hexParticles;
-const hexCount = 30; // Increased count
+const hexCount = 30; 
 let hexData = [];
 let hexDummy = new THREE.Object3D(); 
 
@@ -266,6 +316,13 @@ let fireParticles;
 const fireCount = 300;
 let fireDummy = new THREE.Object3D();
 let fireData = [];
+
+// Coins
+let coinParticles;
+// High capacity for coins across many planets
+const MAX_COINS = 2000; 
+let coinDummy = new THREE.Object3D();
+let coinGeometry, coinMaterial;
 
 // Text Burst
 let floatingTexts = [];
@@ -275,7 +332,7 @@ let sharedSphereGeo;
 
 // --- CUSTOM SHADERS ---
 
-// 1. Planet Shader (5 Color Biome + Danger/Bonus pulse)
+// 1. Planet Shader (5 Color Biome + Danger/Bonus pulse + Distance Fog)
 const planetVertexShader = `
 varying vec3 vWorldPosition;
 varying vec3 vNormal;
@@ -296,6 +353,12 @@ uniform vec3 color5;
 
 uniform vec3 blinkColor;
 uniform float blinkStrength;
+
+// Fog Uniforms
+uniform vec3 fogColor;
+uniform float fogStart;
+uniform float fogEnd;
+uniform vec3 cameraPos; 
 
 varying vec3 vWorldPosition;
 varying vec3 vNormal;
@@ -363,7 +426,7 @@ float fbm(vec3 x) {
 
 void main() {
     float n = fbm(vWorldPosition * 0.04); 
-    n = n * 0.5 + 0.5; // range 0..1 approx
+    n = n * 0.5 + 0.5; 
 
     vec3 finalColor;
     
@@ -386,11 +449,19 @@ void main() {
     
     // Add pulsing blink color overlay (additive)
     vec3 final = baseCol + (blinkColor * blinkStrength);
+
+    // --- FOG / FADE LOGIC ---
+    // Calculate distance from player/camera to this pixel in world space
+    float dist = distance(vWorldPosition, cameraPos);
     
-    gl_FragColor = vec4(final, 1.0);
+    // Smoothstep creates a curve from 0.0 to 1.0 between start and end
+    float fogFactor = smoothstep(fogStart, fogEnd, dist);
+    
+    // Mix the object color with the background color based on fogFactor
+    // If factor is 1.0 (far away), it's fully fogColor.
+    gl_FragColor = vec4(mix(final, fogColor, fogFactor), 1.0);
 }
 `;
-
 
 // Resize handling
 function resize() {
@@ -410,8 +481,7 @@ window.addEventListener('resize', resize);
 function init3D() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x050510);
-    // Reduced fog range for smoother edge fading with smaller render distance
-    scene.fog = new THREE.Fog(0x050510, 200, 1200);
+    scene.fog = new THREE.Fog(0x050510, FOG_START, RENDER_DIST);
 
     camera3D = new THREE.PerspectiveCamera(60, width / height, 0.1, 5000);
     
@@ -430,7 +500,7 @@ function init3D() {
     // Shared Geometries
     sharedSphereGeo = new THREE.SphereGeometry(1, 64, 64); // Smoother for noise
 
-    // Better Spaceship Mesh
+    // Player Mesh
     playerMesh3D = new THREE.Group();
 
     // Fuselage
@@ -478,21 +548,18 @@ function init3D() {
     starPoints = new THREE.Points(starGeometry, starMat);
     scene.add(starPoints);
 
-    // --- REIMPLEMENTED HEXAGON FROM SCRATCH ---
-    // Pure code definition of a Hexagon Ring
+    // Hexagon Ring
     const hexRadius = 2.5;
     const hexThickness = 0.5;
     const hexPts = [];
     const hexInnerPts = [];
     
-    // Generate 6 points
     for (let i = 0; i < 6; i++) {
         const angle = (i / 6) * Math.PI * 2;
         hexPts.push(new THREE.Vector2(Math.cos(angle) * hexRadius, Math.sin(angle) * hexRadius));
         hexInnerPts.push(new THREE.Vector2(Math.cos(angle) * (hexRadius - hexThickness), Math.sin(angle) * (hexRadius - hexThickness)));
     }
     
-    // Create Shape
     const hexShape = new THREE.Shape();
     hexShape.moveTo(hexPts[0].x, hexPts[0].y);
     for (let i = 1; i < 6; i++) hexShape.lineTo(hexPts[i].x, hexPts[i].y);
@@ -502,8 +569,6 @@ function init3D() {
     hexHole.moveTo(hexInnerPts[0].x, hexInnerPts[0].y);
     for (let i = 1; i < 6; i++) hexHole.lineTo(hexInnerPts[i].x, hexInnerPts[i].y);
     hexHole.closePath();
-    
-    hexShape.holes.push(hexHole);
     
     const customHexGeo = new THREE.ShapeGeometry(hexShape);
 
@@ -522,7 +587,7 @@ function init3D() {
     }
     scene.add(hexParticles);
 
-    // Fire Particles (Re-entry)
+    // Fire Particles
     const fireGeo = new THREE.PlaneGeometry(2, 2);
     const fireMat = new THREE.MeshBasicMaterial({
         color: 0xff5500,
@@ -538,11 +603,61 @@ function init3D() {
     for(let i=0; i<fireCount; i++) {
         fireData.push({ life: 0, x:0, y:0, z:0, vx:0, vy:0, vz:0 });
     }
+
+    // Coin Particles
+    coinGeometry = new THREE.CylinderGeometry(2, 2, 0.5, 12);
+    coinGeometry.rotateX(Math.PI/2); // Face player roughly
+    coinMaterial = new THREE.MeshBasicMaterial({ color: 0xffd700 }); // Gold
+    coinParticles = new THREE.InstancedMesh(coinGeometry, coinMaterial, MAX_COINS);
+    coinParticles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(coinParticles);
+}
+
+function updateCoins3D() {
+    let index = 0;
+    const time = Date.now() * 0.003;
+    
+    // Optimization: Loop through active planets, BUT skip those far away
+    // This prevents calculating thousands of coin positions for invisible planets
+    for (let i = 0; i < planets.length; i++) {
+        const p = planets[i];
+        
+        // Fast distance check
+        if (Math.abs(p.x - player.pos.x) > RENDER_DIST) continue; // Skip X check first
+        const distSq = (p.x - player.pos.x)**2 + (p.y - player.pos.y)**2 + (p.z - player.pos.z)**2;
+        
+        if (distSq < RENDER_DIST * RENDER_DIST) {
+            // Planet is visible, process coins
+            for (let j = 0; j < p.coins.length; j++) {
+                const c = p.coins[j];
+                if (c.active && index < MAX_COINS) {
+                     const cx = p.x + c.nx * (p.radius + 3);
+                     const cy = p.y + c.ny * (p.radius + 3);
+                     const cz = p.z + c.nz * (p.radius + 3);
+
+                     coinDummy.position.set(cx, cy, cz);
+                     coinDummy.lookAt(p.x, p.y, p.z);
+                     coinDummy.rotateZ(time);
+                     coinDummy.updateMatrix();
+                     coinParticles.setMatrixAt(index, coinDummy.matrix);
+                     index++;
+                }
+            }
+        }
+    }
+
+    // Zero out remaining
+    for(let i=index; i<MAX_COINS; i++) {
+        coinDummy.scale.set(0,0,0);
+        coinDummy.updateMatrix();
+        coinParticles.setMatrixAt(i, coinDummy.matrix);
+        coinDummy.scale.set(1,1,1); // Reset
+    }
+    coinParticles.instanceMatrix.needsUpdate = true;
 }
 
 function updateHexParticles(playerPos, currentPlanet) {
     if (!currentPlanet || player.state !== 'orbiting') {
-        // Clear if not orbiting
         for (let i = 0; i < hexCount; i++) {
             hexDummy.scale.set(0,0,0);
             hexDummy.updateMatrix();
@@ -555,48 +670,31 @@ function updateHexParticles(playerPos, currentPlanet) {
     hexParticles.visible = true;
     for(let i=0; i<hexCount; i++) {
         const h = hexData[i];
-        
-        // Spawn logic: frequent emission
         if (h.life <= 0) {
             if (Math.random() < 0.2) { 
                 h.life = 1.0;
-                h.x = playerPos.x; 
-                h.y = playerPos.y; 
-                h.z = playerPos.z;
-                
-                // Direction towards planet center
+                h.x = playerPos.x; h.y = playerPos.y; h.z = playerPos.z;
                 const dx = currentPlanet.x - playerPos.x;
                 const dy = currentPlanet.y - playerPos.y;
                 const dz = currentPlanet.z - playerPos.z;
                 const len = Math.sqrt(dx*dx+dy*dy+dz*dz);
-                
-                // Direction normal
                 h.dirX = dx/len; h.dirY = dy/len; h.dirZ = dz/len;
-                
-                // Emission: From bottom of ship
                 const startOffset = 3.0; 
                 h.x += h.dirX * startOffset;
                 h.y += h.dirY * startOffset;
                 h.z += h.dirZ * startOffset;
             }
         }
-        
         if (h.life > 0) {
             h.life -= 0.03;
-            // Move downwards
             const speed = 1.5;
             h.x += h.dirX * speed;
             h.y += h.dirY * speed;
             h.z += h.dirZ * speed;
-            
             hexDummy.position.set(h.x, h.y, h.z);
-            // Orient flat against the direction (look at planet center)
             hexDummy.lookAt(currentPlanet.x, currentPlanet.y, currentPlanet.z);
-            
-            // Expand and "fade" by scaling
-            const s = (1.2 - h.life) * 4.0; // Grows as life decreases
+            const s = (1.2 - h.life) * 4.0;
             hexDummy.scale.set(s, s, s);
-            
             hexDummy.updateMatrix();
             hexParticles.setMatrixAt(i, hexDummy.matrix);
         } else {
@@ -609,7 +707,6 @@ function updateHexParticles(playerPos, currentPlanet) {
 }
 
 function updateFireParticles(player, planets) {
-    // Disable fire if we are orbiting (landed)
     if (player.state === 'orbiting') {
         fireParticles.visible = false;
         return;
@@ -618,10 +715,14 @@ function updateFireParticles(player, planets) {
     let reEntry = false;
     let planet = null;
     let minDist = Infinity;
-    planets.forEach(p => {
+    
+    // Optimized search for reentry planet
+    for(let i=0; i<planets.length; i++) {
+        const p = planets[i];
+        if (Math.abs(p.x - player.pos.x) > 200) continue; // Optimization
         const d = V3.dist(player.pos, p);
         if (d < minDist) { minDist = d; planet = p; }
-    });
+    }
 
     if (planet) {
         const atmRadius = planet.radius * 1.25;
@@ -652,7 +753,6 @@ function updateFireParticles(player, planets) {
 
     fireParticles.visible = reEntry || fireParticles.visible; 
     
-    // Check if any particles are alive, otherwise we can hide
     let anyAlive = false;
     for(let i=0; i<fireCount; i++) {
         const p = fireData[i];
@@ -678,8 +778,8 @@ function updateFireParticles(player, planets) {
 }
 
 // --- Burst Text System ---
-function createFloatingText(x, y, z, text) {
-    floatingTexts.push({ x, y, z, text, life: 1.0, offset: 0 });
+function createFloatingText(x, y, z, text, color = "#ffff66") {
+    floatingTexts.push({ x, y, z, text, life: 1.0, offset: 0, color: color });
 }
 
 function updateFloatingTexts() {
@@ -692,23 +792,23 @@ function updateFloatingTexts() {
 }
 
 function drawFloatingTexts(ctx, camX, camY) {
-    ctx.font = "bold 20px Arial";
+    ctx.font = "bold 20px 'Segoe UI', Arial";
     ctx.textAlign = "center";
     
     floatingTexts.forEach(t => {
-        let sx, sy;
-        
-        // Only 3D Projection logic needed now
         const vec = new THREE.Vector3(t.x, t.y, t.z);
         vec.project(camera3D);
-        sx = (vec.x * 0.5 + 0.5) * width;
-        sy = (-(vec.y * 0.5) + 0.5) * height;
+        const sx = (vec.x * 0.5 + 0.5) * width;
+        const sy = (-(vec.y * 0.5) + 0.5) * height;
 
-        ctx.fillStyle = `rgba(255, 255, 100, ${t.life})`;
-        ctx.strokeStyle = `rgba(0, 0, 0, ${t.life * 0.5})`;
-        ctx.lineWidth = 3;
+        // Fade out
+        ctx.globalAlpha = Math.max(0, t.life);
+        ctx.fillStyle = t.color;
+        ctx.strokeStyle = `rgba(0, 0, 0, ${t.life})`;
+        ctx.lineWidth = 4;
         ctx.strokeText(t.text, sx, sy - t.offset);
         ctx.fillText(t.text, sx, sy - t.offset);
+        ctx.globalAlpha = 1.0;
     });
 }
 
@@ -724,7 +824,6 @@ function updateVisuals3D() {
 
     playerMesh3D.position.set(visualPos.x, visualPos.y, visualPos.z);
     
-    // --- SMOOTH PLAYER ROTATION ---
     let forward = V3.norm(player.vel);
     if (V3.magSq(player.vel) < 0.1) forward = V3.create(1, 0, 0); 
     
@@ -733,7 +832,14 @@ function updateVisuals3D() {
         up = V3.norm(V3.sub(player.pos, player.currentPlanet));
     } else {
         let closest = null; let minD = Infinity;
-        planets.forEach(p=>{const d=V3.dist(p, player.pos); if(d<minD){minD=d; closest=p;}});
+        // Optimization: only search near planets for camera orient
+        for(let i=0; i<planets.length; i++) {
+             const p = planets[i];
+             if (Math.abs(p.x - player.pos.x) > 300) continue;
+             const d = V3.dist(p, player.pos); 
+             if(d<minD){minD=d; closest=p;}
+        }
+
         if(closest && minD < MAX_GRAVITY_DIST) {
             up = V3.norm(V3.sub(player.pos, closest));
         }
@@ -747,11 +853,8 @@ function updateVisuals3D() {
     );
     const targetQ = new THREE.Quaternion();
     targetQ.setFromRotationMatrix(targetM);
-    
-    // Very lazy player rotation
-    playerMesh3D.quaternion.slerp(targetQ, 0.02); 
+    playerMesh3D.quaternion.slerp(targetQ, 0.04); 
 
-    // --- REVERTED CAMERA LOGIC (WORLD SPACE SMOOTHING) ---
     let idealOffset;
     let idealLookAt = player.pos;
 
@@ -769,7 +872,13 @@ function updateVisuals3D() {
         idealOffset = V3.add(player.pos, V3.add(backVec, upVec));
         
         let closest = null; let minD = Infinity;
-        planets.forEach(p=>{const d=V3.dist(p, player.pos); if(d<minD){minD=d; closest=p;}});
+        for(let i=0; i<planets.length; i++) {
+             const p = planets[i];
+             if (Math.abs(p.x - player.pos.x) > 300) continue;
+             const d = V3.dist(p, player.pos); 
+             if(d<minD){minD=d; closest=p;}
+        }
+        
         if(closest && minD < MAX_GRAVITY_DIST) {
              const pNormal = V3.norm(V3.sub(player.pos, closest));
              camUpSmooth.lerp(new THREE.Vector3(pNormal.x, pNormal.y, pNormal.z), 0.005);
@@ -778,22 +887,23 @@ function updateVisuals3D() {
         }
     }
     
-    // World space lerp
     let idealV3 = new THREE.Vector3(idealOffset.x, idealOffset.y, idealOffset.z);
     camPosSmooth.lerp(idealV3, 0.05); 
     camLookAtSmooth.lerp(new THREE.Vector3(idealLookAt.x, idealLookAt.y, idealLookAt.z), 0.05); 
 
-    // Collision Check (Push out from planet)
-    planets.forEach(p => {
+    // Camera Collision - Optimized loop
+    for(let i=0; i<planets.length; i++) {
+        const p = planets[i];
+        if (Math.abs(p.x - player.pos.x) > 300) continue; 
+        
         const center = new THREE.Vector3(p.x, p.y, p.z);
         const dist = camPosSmooth.distanceTo(center);
         const buffer = 20;
         if (dist < p.radius + buffer) {
             const normal = new THREE.Vector3().subVectors(camPosSmooth, center).normalize();
-            // Push camera out
             camPosSmooth.copy(center.add(normal.multiplyScalar(p.radius + buffer)));
         }
-    });
+    }
 
     camera3D.position.copy(camPosSmooth);
     camera3D.up.copy(camUpSmooth);
@@ -813,58 +923,74 @@ function updateVisuals3D() {
     
     updateHexParticles(player.pos, player.currentPlanet);
     updateFireParticles(player, planets);
+    updateCoins3D();
 
-    // Global Blink for shader
     const time = Date.now() * 0.005;
     const blinkVal = (Math.sin(time) + 1.0) * 0.5;
 
-    planets.forEach(p => {
-        if (!planetMeshes.has(p)) {
-            const group = new THREE.Group();
-            group.position.set(p.x, p.y, p.z);
-            const mat = new THREE.ShaderMaterial({
-                uniforms: {
-                    color1: { value: new THREE.Color(p.colors[0]) },
-                    color2: { value: new THREE.Color(p.colors[1]) },
-                    color3: { value: new THREE.Color(p.colors[2]) },
-                    color4: { value: new THREE.Color(p.colors[3]) },
-                    color5: { value: new THREE.Color(p.colors[4]) },
-                    blinkColor: { value: new THREE.Color(0,0,0) },
-                    blinkStrength: { value: 0.0 }
-                },
-                vertexShader: planetVertexShader,
-                fragmentShader: planetFragmentShader
-            });
-            const sphereMesh = new THREE.Mesh(sharedSphereGeo, mat);
-            sphereMesh.scale.set(p.radius, p.radius, p.radius);
-            group.add(sphereMesh);
-            scene.add(group);
-            planetMeshes.set(p, group);
-        }
-        
-        // Update blink uniforms
-        const meshGroup = planetMeshes.get(p);
-        const mesh = meshGroup.children[0];
-        if (mesh && mesh.material.uniforms) {
-            if (p.specialType === 'trap') {
-                mesh.material.uniforms.blinkColor.value.setHex(0xff0000);
-                mesh.material.uniforms.blinkStrength.value = blinkVal * 0.8;
-            } else if (p.specialType === 'bonus') {
-                mesh.material.uniforms.blinkColor.value.setHex(0x00ff00);
-                mesh.material.uniforms.blinkStrength.value = blinkVal * 0.8;
-            } else {
-                mesh.material.uniforms.blinkStrength.value = 0.0;
-            }
-        }
-    });
-
+    // Prune distant meshes from the map
     for (let [p, mesh] of planetMeshes) {
-        // Reduced cleanup distance to match render distance
-        if (V3.dist(p, player.pos) > 1600) { 
+        if (V3.dist(p, player.pos) > RENDER_DIST + 200) { 
             scene.remove(mesh);
             planetMeshes.delete(p);
         }
     }
+
+    // Add new meshes for visible planets
+    for(let i=0; i<planets.length; i++) {
+        const p = planets[i];
+        if (Math.abs(p.x - player.pos.x) > RENDER_DIST) continue; // Early exit
+        const distSq = (p.x-player.pos.x)**2 + (p.y-player.pos.y)**2 + (p.z-player.pos.z)**2;
+        
+        if (distSq < RENDER_DIST * RENDER_DIST) {
+            if (!planetMeshes.has(p)) {
+                const group = new THREE.Group();
+                group.position.set(p.x, p.y, p.z);
+                const mat = new THREE.ShaderMaterial({
+                    uniforms: {
+                        color1: { value: new THREE.Color(p.colors[0]) },
+                        color2: { value: new THREE.Color(p.colors[1]) },
+                        color3: { value: new THREE.Color(p.colors[2]) },
+                        color4: { value: new THREE.Color(p.colors[3]) },
+                        color5: { value: new THREE.Color(p.colors[4]) },
+                        blinkColor: { value: new THREE.Color(0,0,0) },
+                        blinkStrength: { value: 0.0 },
+                        fogColor: { value: new THREE.Color(0x050510) },
+                        fogStart: { value: FOG_START },
+                        fogEnd: { value: RENDER_DIST },
+                        cameraPos: { value: new THREE.Vector3() } 
+                    },
+                    vertexShader: planetVertexShader,
+                    fragmentShader: planetFragmentShader
+                });
+                const sphereMesh = new THREE.Mesh(sharedSphereGeo, mat);
+                sphereMesh.scale.set(p.radius, p.radius, p.radius);
+                group.add(sphereMesh);
+                scene.add(group);
+                planetMeshes.set(p, group);
+            }
+            
+            // Update Uniforms
+            const meshGroup = planetMeshes.get(p);
+            const mesh = meshGroup.children[0];
+            if (mesh && mesh.material.uniforms) {
+                mesh.material.uniforms.cameraPos.value.copy(camera3D.position);
+                mesh.material.uniforms.fogStart.value = FOG_START;
+                mesh.material.uniforms.fogEnd.value = RENDER_DIST;
+
+                if (p.specialType === 'trap') {
+                    mesh.material.uniforms.blinkColor.value.setHex(0xff0000);
+                    mesh.material.uniforms.blinkStrength.value = blinkVal * 0.8;
+                } else if (p.specialType === 'bonus') {
+                    mesh.material.uniforms.blinkColor.value.setHex(0x00ff00);
+                    mesh.material.uniforms.blinkStrength.value = blinkVal * 0.8;
+                } else {
+                    mesh.material.uniforms.blinkStrength.value = 0.0;
+                }
+            }
+        }
+    }
+    
     renderer3D.render(scene, camera3D);
 }
 
@@ -878,8 +1004,9 @@ class Planet {
         this.baseColor = this.generateColor(type);
         this.colors = this.generateBiomeColors(this.baseColor); 
         this.visited = false;
+        this.passed = false; // For flyby logic
         this.specialType = 'none'; // 'none', 'trap', 'bonus'
-        this.atmosphereColor = `rgba(${this.baseColor.r}, ${this.baseColor.g}, ${this.baseColor.b}, 0.2)`;
+        this.coins = this.generateCoins();
     }
     
     generateColor(val) {
@@ -898,13 +1025,39 @@ class Planet {
 
         return [c1.getStyle(), c2.getStyle(), c3.getStyle(), c4.getStyle(), c5.getStyle()];
     }
+
+    generateCoins() {
+        const coins = [];
+        // Approximate "every triangle of virtual icosahedron" (frequency 8 has ~1280 faces, 
+        // 64x64 sphere has ~8000 faces). 
+        // User requested 1/500 chance per triangle. 
+        // Let's assume a standard mesh of ~4000 triangles for a planet this size.
+        // 4000 / 500 = 8 coins avg.
+        // We will distribute points uniformly using Fibonacci Sphere, then filter by chance.
+        
+        const numPoints = 4000; // Representation of triangle count
+        const phi = Math.PI * (3.0 - Math.sqrt(5.0));
+
+        for (let i = 0; i < numPoints; i++) {
+            // 1/500 chance
+            if (Math.random() < (1.0/500.0)) {
+                const y = 1 - (i / (numPoints - 1)) * 2;
+                const radiusAtY = Math.sqrt(1 - y * y);
+                const theta = phi * i;
+                const x = Math.cos(theta) * radiusAtY;
+                const z = Math.sin(theta) * radiusAtY;
+                
+                coins.push({ nx: x, ny: y, nz: z, active: true });
+            }
+        }
+        return coins;
+    }
 }
 
 class Player {
     constructor() {
         this.width = 12;
         this.height = 16;
-        this.color = '#00ffff';
         this.reset();
     }
 
@@ -914,11 +1067,12 @@ class Player {
         this.lastPlanet = null;
         this.jumpCooldown = 0;
         this.runSpeed = 4.0;
-        this.angle = -Math.PI/2; 
         this.pos = V3.create(0, 0, 0);
         this.vel = V3.create(0, 0, 0);
         this.orbitAxis = V3.create(0, 0, 1);
         this.jumpStartPos = null;
+        // Flyby tracking: Map planet -> minDistanceSeen
+        this.flybyTracker = new Map();
     }
 
     update() {
@@ -941,31 +1095,106 @@ class Player {
         const newRelPos = V3.rotate(relPos, this.orbitAxis, omega);
         this.pos = V3.add(p, newRelPos);
         
-        this.angle = Math.atan2(newRelPos.y, newRelPos.x);
-
         const normal2 = V3.norm(newRelPos);
         const tangent = V3.norm(V3.cross(this.orbitAxis, normal2));
         this.vel = V3.scale(tangent, this.runSpeed);
+
+        this.checkCoins(p);
     }
 
     updateFlight() {
         let gravity = V3.create(0, 0, 0);
 
-        planets.forEach(p => {
+        // Track closest distance to planets in range
+        const currentFrameNearPlanets = new Set();
+        
+        // Optimize gravity loop to only nearby planets
+        // Since planets is sorted by creation (roughly Z), we could optimize, 
+        // but spatial filter is safer.
+        for(let i=0; i<planets.length; i++) {
+            const p = planets[i];
+            
+            // Optimization: Skip very far planets
+            if (Math.abs(p.x - this.pos.x) > MAX_GRAVITY_DIST) continue;
+            
             // Ignore gravity of just-left planet for short duration
-            if (this.jumpCooldown > 0 && p === this.lastPlanet) return;
+            if (this.jumpCooldown > 0 && p === this.lastPlanet) continue;
 
             const dist = V3.dist(p, this.pos);
             if (dist < MAX_GRAVITY_DIST) {
+                // Gravity
                 const fMag = (GRAVITY * p.mass) / (dist*dist);
                 const dir = V3.norm(V3.sub(p, this.pos));
                 gravity = V3.add(gravity, V3.scale(dir, fMag));
+                
+                // Land?
                 if (dist < p.radius + 1.0) this.land(p);
+
+                // Coin Collection in flight (allow skimming)
+                if (dist < p.radius + 10) this.checkCoins(p);
+
+                // Flyby Tracking
+                if (p !== this.lastPlanet && !p.visited && !p.passed) {
+                    currentFrameNearPlanets.add(p);
+                    
+                    const currentMin = this.flybyTracker.get(p) || Infinity;
+                    if (dist < currentMin) {
+                        this.flybyTracker.set(p, dist);
+                    }
+                }
             }
-        });
+        }
+
+        // Check for completed flybys
+        for (let [p, minDist] of this.flybyTracker) {
+            if (!currentFrameNearPlanets.has(p)) {
+                // We left the gravity well
+                // Check if we met the criteria (Flyby Radius Slider)
+                const threshold = p.radius * FLYBY_RADIUS_MULT;
+                if (minDist < threshold) {
+                    this.completeFlyby(p);
+                }
+                // Stop tracking this planet
+                this.flybyTracker.delete(p);
+            }
+        }
+        
+        // Remove tracking for planets that are no longer relevant but weren't "finished" properly
+        // (Clean up planets that disappeared or we teleported away from)
+        for (let [p, minDist] of this.flybyTracker) {
+            if (V3.dist(p, this.pos) > MAX_GRAVITY_DIST * 1.5) {
+                this.flybyTracker.delete(p);
+            }
+        }
 
         this.vel = V3.add(this.vel, gravity);
         this.pos = V3.add(this.pos, this.vel);
+    }
+
+    checkCoins(planet) {
+        planet.coins.forEach(c => {
+            if (c.active) {
+                const cx = planet.x + c.nx * (planet.radius + 3);
+                const cy = planet.y + c.ny * (planet.radius + 3);
+                const cz = planet.z + c.nz * (planet.radius + 3);
+                
+                // Coin hit radius ~4 units
+                if ((this.pos.x-cx)**2 + (this.pos.y-cy)**2 + (this.pos.z-cz)**2 < 16) {
+                    c.active = false;
+                    score += 1000;
+                    scoreEl.innerText = score;
+                    createFloatingText(cx, cy, cz, "+1000", "#ffd700");
+                }
+            }
+        });
+    }
+
+    completeFlyby(p) {
+        if (p.passed) return;
+        p.passed = true;
+        flybyStreak++;
+        updateStreakUI();
+        createFloatingText(p.x, p.y + p.radius + 20, p.z, "CLOSE CALL! x" + flybyStreak, "#ffaa00");
     }
 
     jump() {
@@ -973,7 +1202,6 @@ class Player {
         
         this.jumpStartPos = { ...this.pos };
         this.lastPlanet = this.currentPlanet;
-        // 60 frames (approx 1 sec) of gravity-free flight from this planet
         this.jumpCooldown = 60; 
 
         const normal = V3.norm(V3.sub(this.pos, this.currentPlanet));
@@ -985,21 +1213,18 @@ class Player {
              tangent = V3.norm(V3.cross(this.orbitAxis, normal));
         }
         
-        // Powerful tangential burst to escape gravity
-        // No upward component, just pure forward momentum
         const burstSpeed = 12.0; 
         const jumpVec = V3.scale(tangent, this.runSpeed + burstSpeed);
         
         this.vel = jumpVec;
-        // Snap position slightly up to break "landed" check threshold instantly
         this.pos = V3.add(this.pos, V3.scale(normal, 5.0));
 
         this.state = 'flying';
         this.currentPlanet = null;
+        this.flybyTracker.clear();
     }
 
     land(planet) {
-        // Game Over Logic for Traps
         if (planet.specialType === 'trap') {
             gameOverScreen.style.display = 'flex';
             isGameOver = true;
@@ -1010,8 +1235,15 @@ class Player {
         this.currentPlanet = planet;
         this.lastPlanet = null;
         this.jumpCooldown = 0;
+        this.flybyTracker.clear();
         
-        // Assign new traps/bonuses around us
+        // Reset Streak on land
+        if (flybyStreak > 0) {
+            createFloatingText(this.pos.x, this.pos.y, this.pos.z, "STREAK ENDED", "#aaaaaa");
+        }
+        flybyStreak = 0;
+        updateStreakUI();
+        
         assignPlanetTypes(planet);
         
         const normal = V3.norm(V3.sub(this.pos, planet));
@@ -1030,10 +1262,9 @@ class Player {
                 const dist = V3.dist(this.pos, this.jumpStartPos);
                 points = Math.floor(dist);
             }
-            // Double points for green planets
             if (planet.specialType === 'bonus') {
                 points *= 2;
-                createFloatingText(this.pos.x, this.pos.y, this.pos.z, "BONUS! +" + points);
+                createFloatingText(this.pos.x, this.pos.y, this.pos.z, "BONUS! +" + points, "#00ff00");
             } else {
                 createFloatingText(this.pos.x, this.pos.y, this.pos.z, "+" + points);
             }
@@ -1044,31 +1275,28 @@ class Player {
     }
 }
 
-// --- Gameplay Logic: Traps & Bonuses ---
-function assignPlanetTypes(currentP) {
-    // Reset all
-    planets.forEach(p => p.specialType = 'none');
-    
-    // Find candidates within reasonable range (not too far, not current)
-    const candidates = planets.filter(p => p !== currentP && V3.dist(p, currentP) < 2500);
-    
-    // Shuffle
-    candidates.sort(() => Math.random() - 0.5);
-    
-    // Pick 3 traps
-    for(let i=0; i<3 && i<candidates.length; i++) {
-        candidates[i].specialType = 'trap';
-    }
-    // Pick 1 bonus (start checking after traps)
-    if (candidates.length > 3) {
-        candidates[3].specialType = 'bonus';
+function updateStreakUI() {
+    streakEl.innerText = flybyStreak;
+    if (flybyStreak > 0) {
+        streakContainer.style.opacity = 1;
+        streakContainer.style.transform = `scale(${1 + Math.min(flybyStreak * 0.1, 0.5)})`;
+    } else {
+        streakContainer.style.opacity = 0;
+        streakContainer.style.transform = "scale(1)";
     }
 }
 
+// --- Gameplay Logic: Traps & Bonuses ---
+function assignPlanetTypes(currentP) {
+    planets.forEach(p => p.specialType = 'none');
+    const candidates = planets.filter(p => p !== currentP && V3.dist(p, currentP) < 2500);
+    candidates.sort(() => Math.random() - 0.5);
+    for(let i=0; i<3 && i<candidates.length; i++) candidates[i].specialType = 'trap';
+    if (candidates.length > 3) candidates[3].specialType = 'bonus';
+}
 
 // --- Procedural Generation ---
 
-const generatedChunks = new Set();
 function getChunkId(gx, gy, gz) { return `${gx},${gy},${gz}`; }
 
 function generateWorld(px, py, pz) {
@@ -1076,12 +1304,12 @@ function generateWorld(px, py, pz) {
     const gy = Math.floor(py / GRID_SIZE);
     const gz = Math.floor(pz / GRID_SIZE);
 
-    // Optimization: Only generate if chunk coords changed
     if (gx === lastChunk.x && gy === lastChunk.y && gz === lastChunk.z) return;
     lastChunk = {x: gx, y: gy, z: gz};
 
-    // Reduced radius for render distance halving (5 -> 3)
-    const rad = 3; 
+    // Render distance (chunks) - Dynamic based on slider? 
+    // We can just keep generation distance slightly larger than max render distance
+    const rad = 5; 
     const zMin = gz - rad;
     const zMax = gz + rad;
 
@@ -1102,44 +1330,49 @@ function generateChunk(gx, gy, gz) {
     const scale = 0.1;
     const noiseVal = Perlin.noise(gx * scale, gy * scale, gz * scale);
     const seed = gx * 123 + gy * 456 + gz * 789;
-    const rnd = Math.abs(Math.sin(seed));
+    
+    // Increased randomness factor
+    const rnd1 = Math.abs(Math.sin(seed));
+    const rnd2 = Math.abs(Math.cos(seed * 2.5));
 
-    // Threshold for density
-    if (noiseVal > 0.15 || (rnd > 0.85)) {
+    // Variable Density Modified by Slider
+    const densityNoise = Math.sin(gx * 0.2) * Math.cos(gz * 0.2); 
+    // Base threshold was ~0.15. Lower threshold = more planets.
+    // Slider (0 to 2, default 1). Higher slider = More planets = LOWER threshold.
+    // Inverse relationship logic:
+    // Slider 1.0 -> modifier 0. 
+    // Slider 2.0 -> modifier -0.2 (more dense)
+    // Slider 0.0 -> modifier +0.2 (less dense)
+    const sliderMod = (1.0 - WORLD_DENSITY) * 0.3;
+    const threshold = 0.15 + (densityNoise * 0.1) + sliderMod; 
+
+    if (noiseVal > threshold || (rnd1 > 0.8)) {
         const cx = gx * GRID_SIZE + GRID_SIZE / 2;
         const cy = gy * GRID_SIZE + GRID_SIZE / 2;
         const cz = gz * GRID_SIZE + GRID_SIZE / 2;
         
-        // More random placement logic (not looking like a grid)
-        // Offset up to 80% of grid size instead of small jitter
-        const offsetRange = GRID_SIZE * 0.8;
-        const ox = (Math.sin(gx * 12.9898 + gy * 78.233 + gz * 37.719) * 0.5) * offsetRange;
-        const oy = (Math.cos(gy * 23.381 + gz * 11.21 + gx * 4.91) * 0.5) * offsetRange;
-        const oz = (Math.sin(gz * 91.1 + gx * 7.33 + gy * 19.8) * 0.5) * offsetRange;
+        const offsetRange = GRID_SIZE * 0.9;
+        const ox = (rnd1 - 0.5) * offsetRange;
+        const oy = (rnd2 - 0.5) * offsetRange;
+        const oz = (Math.sin(seed * 3) * 0.5) * offsetRange;
 
         let px = cx + ox;
         let py = cy + oy;
         let pz = cz + oz;
         
-        // Variable planet sizes based on noise
-        // range: 20 to 120
-        let radius = 20 + Math.abs(noiseVal) * 100 + rnd * 20;
+        let radius = 15 + (rnd1 * rnd2 * 140) + (Math.abs(noiseVal) * 40);
 
         if (gx === 0 && gy === 0 && gz === 0) {
             px=0; py=0; pz=0; radius=60;
         }
 
-        // --- NEW COLLISION CHECK ---
-        // Check strict overlap against existing planets before spawning
-        // We only check against planets in reasonable memory. 
-        // For standard "jumper" speeds, checking the array is fast enough.
         let overlaps = false;
-        const safeBuffer = 50; // extra space between planets
+        const safeBuffer = 50; 
         
-        // Optimization: Checking against ALL planets might get slow over time,
-        // but typically the count is < 500 for a play session. 
-        for(let i=0; i<planets.length; i++) {
+        for(let i=planets.length - 1; i >= 0; i--) {
             const other = planets[i];
+            if (Math.abs(px - other.x) > 500) continue; 
+
             const distSq = (px-other.x)**2 + (py-other.y)**2 + (pz-other.z)**2;
             const minDist = radius + other.radius + safeBuffer;
             if (distSq < minDist * minDist) {
@@ -1156,6 +1389,62 @@ function generateChunk(gx, gy, gz) {
     }
 }
 
+// --- OPTIMIZATION: World Cleanup ---
+let lastCleanupTime = 0;
+function cleanupWorld() {
+    // Only run every ~60 frames or so (called in update)
+    // Remove planets that are far behind the player (beyond render dist * 1.5)
+    // We assume the player moves generally in one direction or explores locally.
+    // If we delete a planet and the player goes back, it needs to regenerate.
+    // However, since seed is deterministic, simple regeneration works if we clear the chunk from "generatedChunks".
+    
+    const removalDistSq = (RENDER_DIST * 1.5) ** 2;
+    const playerPos = player.pos;
+
+    // Filter planets in place or create new array
+    // Creating new array is cleaner
+    const keepPlanets = [];
+    
+    for(let i=0; i<planets.length; i++) {
+        const p = planets[i];
+        
+        // Always keep the planet we are on or just left
+        if (p === player.currentPlanet || p === player.lastPlanet) {
+            keepPlanets.push(p);
+            continue;
+        }
+
+        const distSq = (p.x - playerPos.x)**2 + (p.y - playerPos.y)**2 + (p.z - playerPos.z)**2;
+        
+        if (distSq < removalDistSq) {
+            keepPlanets.push(p);
+        } else {
+            // Planet is removed. We should allow its chunk to regenerate if we return.
+            // Calculate chunk ID
+            const gx = Math.floor(p.x / GRID_SIZE);
+            const gy = Math.floor(p.y / GRID_SIZE);
+            const gz = Math.floor(p.z / GRID_SIZE);
+            const id = getChunkId(gx, gy, gz);
+            
+            // It's safe to delete from set even if other planets are in it, 
+            // because generateChunk checks collisions/density again anyway if called.
+            // But to avoid re-generating immediately if we are on the edge, we only delete if VERY far.
+            // Actually, simply removing from 'planets' is enough to free memory.
+            // If we go back, 'generateWorld' will see the chunk ID is present and NOT regen.
+            // So we MUST delete from generatedChunks if we want it to reappear.
+            generatedChunks.delete(id);
+            
+            // Also ensure visuals are gone (handled in updateVisuals3D but good to be sure)
+            if (planetMeshes.has(p)) {
+                scene.remove(planetMeshes.get(p));
+                planetMeshes.delete(p);
+            }
+        }
+    }
+    
+    planets = keepPlanets;
+}
+
 // --- Main Loop ---
 
 function init() {
@@ -1170,31 +1459,28 @@ function resetGameMode() {
     isGameOver = false;
     gameOverScreen.style.display = 'none';
     score = 0;
+    flybyStreak = 0;
     scoreEl.innerText = 0;
+    updateStreakUI();
     
-    // Reset generation state
     planets = [];
     generatedChunks.clear();
-    lastChunk = {x: -999, y: -999, z: -999}; // Force re-gen
+    lastChunk = {x: -999, y: -999, z: -999}; 
     
     planetMeshes.forEach(mesh => scene.remove(mesh));
     planetMeshes.clear();
     
     player.reset();
     
-    const c3d = document.getElementById('threeCanvas');
-    const c2d = document.getElementById('gameCanvas');
-    
-    // Always 3D Mode
-    c3d.style.display = 'block';
-    c2d.style.display = 'block'; 
+    document.getElementById('threeCanvas').style.display = 'block';
+    document.getElementById('gameCanvas').style.display = 'block'; 
     steerHint.style.display = 'block';
     
-    player.runSpeed = 0.5;
-    speedSlider.value = 0.5;
-    speedVal.innerText = 0.5;
+    // Updated default speed
+    player.runSpeed = 1.0;
+    speedSlider.value = 1.0;
+    speedVal.innerText = 1.0;
     
-    // Reset cam smoothers
     camPosSmooth.set(0,0,500);
     camUpSmooth.set(0,1,0);
 
@@ -1217,12 +1503,33 @@ function resetGameMode() {
 }
 
 advancedToggle.addEventListener('change', () => {
-    advancedControls.style.display = advancedToggle.checked ? 'block' : 'none';
+    advancedControls.style.display = advancedToggle.checked ? 'flex' : 'none';
 });
 speedSlider.addEventListener('input', () => {
     player.runSpeed = parseFloat(speedSlider.value);
     speedVal.innerText = speedSlider.value;
 });
+distSlider.addEventListener('input', () => {
+    RENDER_DIST = parseFloat(distSlider.value);
+    FOG_START = RENDER_DIST * 0.6;
+    distVal.innerText = distSlider.value;
+    if (scene && scene.fog) {
+        scene.fog.far = RENDER_DIST;
+        scene.fog.near = FOG_START;
+    }
+});
+densitySlider.addEventListener('input', () => {
+    // 0 = sparse, 1 = normal, 2 = dense
+    const val = parseFloat(densitySlider.value);
+    WORLD_DENSITY = val;
+    const txt = val < 0.5 ? "Sparse" : (val > 1.5 ? "Dense" : "Normal");
+    densityVal.innerText = txt;
+});
+flybySlider.addEventListener('input', () => {
+    FLYBY_RADIUS_MULT = parseFloat(flybySlider.value);
+    flybyVal.innerText = FLYBY_RADIUS_MULT + "x";
+});
+
 
 function update() {
     if (isGameOver) return;
@@ -1230,6 +1537,9 @@ function update() {
     gameTime++;
     player.update();
     generateWorld(player.pos.x, player.pos.y, player.pos.z);
+    
+    // Run cleanup every 100 frames
+    if (gameTime % 100 === 0) cleanupWorld();
     
     velEl.innerText = Math.round(V3.mag(player.vel));
     coordsEl.innerText = `${Math.round(player.pos.x)}, ${Math.round(player.pos.y)}, ${Math.round(player.pos.z)}`;
@@ -1239,7 +1549,6 @@ function update() {
 }
 
 function drawHUD() {
-    // Just clear the 2D canvas and draw the HUD elements
     ctx.clearRect(0, 0, width, height);
     drawFloatingTexts(ctx, 0, 0);
 }
