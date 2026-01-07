@@ -1,0 +1,1236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Planet Jumper 3D</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050510;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: white;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        #gameCanvas {
+            z-index: 1; /* Used for 2D game AND 3D text overlay */
+            pointer-events: none; /* Let clicks pass through to 3D canvas if needed */
+        }
+        #threeCanvas {
+            z-index: 0;
+            display: none;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        #settings {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 8px;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+        p {
+            margin: 5px 0;
+            font-size: 14px;
+            color: #aaa;
+        }
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            font-size: 16px;
+            color: rgba(255, 255, 255, 0.7);
+            pointer-events: none;
+            animation: pulse 2s infinite;
+            z-index: 10;
+        }
+        .key {
+            display: inline-block;
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 4px;
+            border: 1px solid #555;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        input[type="checkbox"] {
+            margin-right: 8px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        input[type="range"] {
+            margin-left: 10px;
+            cursor: pointer;
+        }
+        #advancedControls {
+            margin-top: 5px; 
+            padding-left: 5px; 
+            border-left: 2px solid #444;
+            display: none;
+        }
+        @keyframes pulse {
+            0% { opacity: 0.4; }
+            50% { opacity: 1; }
+            100% { opacity: 0.4; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h1>PLANET JUMPER</h1>
+    <p>Score: <span id="score">0</span></p>
+    <p>Velocity: <span id="vel">0</span></p>
+    <p>Coordinates: <span id="coords">0, 0, 0</span></p>
+</div>
+
+<div id="settings">
+    <label>
+        <input type="checkbox" id="mode3dToggle"> 3D Mode
+    </label>
+    <label>
+        <input type="checkbox" id="advancedToggle"> Advanced Mode
+    </label>
+    <div id="advancedControls">
+        <label style="font-size:12px">
+            Speed: <span id="speedVal">0.5</span>
+            <input type="range" id="speedSlider" min="0.1" max="10.0" step="0.1" value="0.5">
+        </label>
+    </div>
+</div>
+
+<div id="controls-hint">
+    <span id="hint-text">Tap / Click to Jump</span>
+    <div id="steer-hint" style="display:none; margin-top:5px; font-size: 12px; color: #00ffff;">
+        Use <span class="key">←</span> <span class="key">→</span> to steer orbit
+    </div>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+// --- Math Helpers (Vector3) ---
+const V3 = {
+    create: (x, y, z) => ({x: x||0, y: y||0, z: z||0}),
+    add: (a, b) => ({x: a.x+b.x, y: a.y+b.y, z: a.z+b.z}),
+    sub: (a, b) => ({x: a.x-b.x, y: a.y-b.y, z: a.z-b.z}),
+    scale: (v, s) => ({x: v.x*s, y: v.y*s, z: v.z*s}),
+    dot: (a, b) => a.x*b.x + a.y*b.y + a.z*b.z,
+    cross: (a, b) => ({
+        x: a.y*b.z - a.z*b.y,
+        y: a.z*b.x - a.x*b.z,
+        z: a.x*b.y - a.y*b.x
+    }),
+    magSq: (v) => v.x*v.x + v.y*v.y + v.z*v.z,
+    mag: (v) => Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z),
+    norm: (v) => {
+        const m = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+        return m === 0 ? {x:0, y:0, z:0} : {x: v.x/m, y: v.y/m, z: v.z/m};
+    },
+    dist: (a, b) => Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2),
+    rotate: (v, k, theta) => {
+        const cos = Math.cos(theta);
+        const sin = Math.sin(theta);
+        const kCrossV = V3.cross(k, v);
+        const kDotV = V3.dot(k, v);
+        return {
+            x: v.x*cos + kCrossV.x*sin + k.x*kDotV*(1-cos),
+            y: v.y*cos + kCrossV.y*sin + k.y*kDotV*(1-cos),
+            z: v.z*cos + kCrossV.z*sin + k.z*kDotV*(1-cos)
+        };
+    }
+};
+
+/**
+ * Simple 3D Noise Implementation
+ */
+const Perlin = {
+    rand: {},
+    seed: function(seed) { this.rand = { seed: seed }; },
+    random: function() { var x = Math.sin(this.rand.seed++) * 10000; return x - Math.floor(x); },
+    fade: function(t) { return t * t * t * (t * (t * 6 - 15) + 10); },
+    lerp: function(t, a, b) { return a + t * (b - a); },
+    noise: function(x, y, z) {
+        return this.noise2d(x + z*0.5, y - z*0.5); 
+    },
+    noise2d: function(x, y) {
+        var X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+        x -= Math.floor(x); y -= Math.floor(y);
+        var u = this.fade(x), v = this.fade(y);
+        const p = (X, Y) => {
+            let n = X + Y * 57; n = (n << 13) ^ n;
+            return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0);
+        };
+        let aa = p(X, Y), ab = p(X, Y + 1), ba = p(X + 1, Y), bb = p(X + 1, Y + 1);
+        return this.lerp(v, this.lerp(u, aa, ba), this.lerp(u, ab, bb));
+    }
+};
+
+// --- Game Constants & Setup ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const velEl = document.getElementById('vel');
+const coordsEl = document.getElementById('coords');
+const modeToggle = document.getElementById('mode3dToggle');
+const advancedToggle = document.getElementById('advancedToggle');
+const advancedControls = document.getElementById('advancedControls');
+const speedSlider = document.getElementById('speedSlider');
+const speedVal = document.getElementById('speedVal');
+const steerHint = document.getElementById('steer-hint');
+
+let width, height;
+const GRAVITY = 0.5;
+const MAX_GRAVITY_DIST = 800;
+const GRID_SIZE = 400;
+
+// Game State
+let planets = [];
+let stars = [];
+let player;
+let camera = { x: 0, y: 0, z: 200 }; 
+let score = 0;
+let gameTime = 0;
+let is3DMode = false;
+let inputState = { left: false, right: false };
+
+// 3D Engine Globals
+let scene, camera3D, renderer3D, playerMesh3D;
+let planetMeshes = new Map();
+let starPoints, starGeometry;
+// Smoother camera vars
+let camPosSmooth = new THREE.Vector3(0,0,500);
+let camLookAtSmooth = new THREE.Vector3(0,0,0);
+let camUpSmooth = new THREE.Vector3(0,1,0);
+
+
+// Particles
+let hexParticles;
+const hexCount = 30; // Increased count
+let hexData = [];
+let hexDummy = new THREE.Object3D(); 
+
+let fireParticles;
+const fireCount = 300;
+let fireDummy = new THREE.Object3D();
+let fireData = [];
+
+// Text Burst
+let floatingTexts = [];
+
+// Optimization: Shared Geometries
+let sharedSphereGeo;
+
+// --- CUSTOM SHADERS ---
+
+// 1. Planet Shader (5 Color Biome)
+const planetVertexShader = `
+varying vec3 vWorldPosition;
+varying vec3 vNormal;
+void main() {
+    vNormal = normalize(normalMatrix * normal);
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPosition.xyz;
+    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+}
+`;
+
+const planetFragmentShader = `
+uniform vec3 color1;
+uniform vec3 color2;
+uniform vec3 color3;
+uniform vec3 color4;
+uniform vec3 color5;
+
+varying vec3 vWorldPosition;
+varying vec3 vNormal;
+
+// Fast noise function
+vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+float snoise(vec3 v) { 
+  const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+  const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i  = floor(v + dot(v, C.yyy) );
+  vec3 x0 = v - i + dot(i, C.xxx) ;
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min( g.xyz, l.zxy );
+  vec3 i2 = max( g.xyz, l.zxy );
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy; 
+  vec3 x3 = x0 - D.yyy;      
+  i = mod289(i); 
+  vec4 p = permute( permute( permute( 
+             i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+           + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+           + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+  float n_ = 0.142857142857; 
+  vec3  ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z); 
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_ );   
+  vec4 x = x_ *ns.x + ns.yyyy;
+  vec4 y = y_ *ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4( x.xy, y.xy );
+  vec4 b1 = vec4( x.zw, y.zw );
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+  vec3 p0 = vec3(a0.xy,h.x);
+  vec3 p1 = vec3(a0.zw,h.y);
+  vec3 p2 = vec3(a1.xy,h.z);
+  vec3 p3 = vec3(a1.zw,h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+}
+
+float fbm(vec3 x) {
+    float v = 0.0;
+    float a = 0.5;
+    vec3 shift = vec3(100.0);
+    for (int i = 0; i < 3; ++i) {
+        v += a * snoise(x);
+        x = x * 2.0 + shift;
+        a *= 0.5;
+    }
+    return v;
+}
+
+void main() {
+    float n = fbm(vWorldPosition * 0.04); 
+    n = n * 0.5 + 0.5; // range 0..1 approx
+
+    vec3 finalColor;
+    
+    // 5-Color Biome Stepping
+    if (n < 0.3) {
+        finalColor = mix(color1, color2, smoothstep(0.2, 0.3, n));
+    } else if (n < 0.5) {
+        finalColor = mix(color2, color3, smoothstep(0.4, 0.5, n));
+    } else if (n < 0.7) {
+        finalColor = mix(color3, color4, smoothstep(0.6, 0.7, n));
+    } else {
+        finalColor = mix(color4, color5, smoothstep(0.8, 0.9, n));
+    }
+
+    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
+    float diff = max(dot(vNormal, lightDir), 0.0);
+    float ambient = 0.2;
+    
+    gl_FragColor = vec4(finalColor * (diff + ambient), 1.0);
+}
+`;
+
+
+// Resize handling
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    if (renderer3D) {
+        renderer3D.setSize(width, height);
+        camera3D.aspect = width / height;
+        camera3D.updateProjectionMatrix();
+    }
+}
+window.addEventListener('resize', resize);
+
+// --- 3D Engine Setup ---
+function init3D() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x050510);
+    scene.fog = new THREE.Fog(0x050510, 500, 3000);
+
+    camera3D = new THREE.PerspectiveCamera(60, width / height, 0.1, 5000);
+    
+    renderer3D = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer3D.setSize(width, height);
+    renderer3D.domElement.id = 'threeCanvas';
+    document.body.appendChild(renderer3D.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambientLight);
+    
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(50, 100, 100);
+    scene.add(dirLight);
+
+    // Shared Geometries
+    sharedSphereGeo = new THREE.SphereGeometry(1, 64, 64); // Smoother for noise
+
+    // Better Spaceship Mesh
+    playerMesh3D = new THREE.Group();
+
+    // Fuselage
+    const fuseGeo = new THREE.CylinderGeometry(0.5, 1.5, 8, 8);
+    fuseGeo.rotateX(Math.PI/2);
+    const fuseMat = new THREE.MeshStandardMaterial({ color: 0x00ffff, roughness: 0.4 });
+    const fuse = new THREE.Mesh(fuseGeo, fuseMat);
+    playerMesh3D.add(fuse);
+
+    // Cockpit
+    const cockGeo = new THREE.SphereGeometry(1.2, 8, 8);
+    const cockMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.8, roughness: 0.2 });
+    const cockpit = new THREE.Mesh(cockGeo, cockMat);
+    cockpit.position.set(0, 0.5, 1);
+    cockpit.scale.set(1, 0.6, 1.5);
+    playerMesh3D.add(cockpit);
+
+    // Wings
+    const wingGeo = new THREE.BoxGeometry(8, 0.2, 3);
+    const wingMat = new THREE.MeshStandardMaterial({ color: 0x0088aa });
+    const wings = new THREE.Mesh(wingGeo, wingMat);
+    wings.position.set(0, 0, -1);
+    playerMesh3D.add(wings);
+
+    // Engine Glow
+    const engineGeo = new THREE.CylinderGeometry(0.8, 0.5, 1, 8);
+    engineGeo.rotateX(Math.PI/2);
+    const engineMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+    const engine = new THREE.Mesh(engineGeo, engineMat);
+    engine.position.set(0, 0, -4.5);
+    playerMesh3D.add(engine);
+
+    scene.add(playerMesh3D);
+
+    // Infinite Starfield
+    starGeometry = new THREE.BufferGeometry();
+    const starCount = 3000;
+    const posArray = new Float32Array(starCount * 3);
+    const spread = 2000;
+    for(let i=0; i<starCount * 3; i++) {
+        posArray[i] = (Math.random() - 0.5) * spread; 
+    }
+    starGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+    const starMat = new THREE.PointsMaterial({size: 3, color: 0xffffff, transparent: true, opacity: 0.6});
+    starPoints = new THREE.Points(starGeometry, starMat);
+    scene.add(starPoints);
+
+    // Shield Hexagon Particles (Instanced Mesh)
+    // Larger Ring
+    const hexGeo = new THREE.RingGeometry(2.0, 2.5, 6); 
+    const hexMat = new THREE.MeshBasicMaterial({ 
+        color: 0x00aaff, 
+        transparent: true, 
+        opacity: 0.8, 
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+    });
+    hexParticles = new THREE.InstancedMesh(hexGeo, hexMat, hexCount);
+    hexParticles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    for(let i=0; i<hexCount; i++) {
+        hexData.push({ life: 0, x:0, y:0, z:0, dirX:0, dirY:0, dirZ:0 });
+    }
+    scene.add(hexParticles);
+
+    // Fire Particles (Re-entry)
+    const fireGeo = new THREE.PlaneGeometry(2, 2);
+    const fireMat = new THREE.MeshBasicMaterial({
+        color: 0xff5500,
+        transparent: true,
+        opacity: 0.8,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending
+    });
+    fireParticles = new THREE.InstancedMesh(fireGeo, fireMat, fireCount);
+    fireParticles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(fireParticles);
+
+    for(let i=0; i<fireCount; i++) {
+        fireData.push({ life: 0, x:0, y:0, z:0, vx:0, vy:0, vz:0 });
+    }
+}
+
+function updateHexParticles(playerPos, currentPlanet) {
+    if (!currentPlanet || player.state !== 'orbiting') {
+        // Clear if not orbiting
+        for (let i = 0; i < hexCount; i++) {
+            hexDummy.scale.set(0,0,0);
+            hexDummy.updateMatrix();
+            hexParticles.setMatrixAt(i, hexDummy.matrix);
+        }
+        hexParticles.instanceMatrix.needsUpdate = true;
+        return;
+    }
+    
+    hexParticles.visible = true;
+    for(let i=0; i<hexCount; i++) {
+        const h = hexData[i];
+        
+        // Spawn logic: frequent emission
+        if (h.life <= 0) {
+            if (Math.random() < 0.2) { 
+                h.life = 1.0;
+                // Start slightly BELOW the ship model (relative to planet)
+                h.x = playerPos.x; 
+                h.y = playerPos.y; 
+                h.z = playerPos.z;
+                
+                // Direction towards planet center
+                const dx = currentPlanet.x - playerPos.x;
+                const dy = currentPlanet.y - playerPos.y;
+                const dz = currentPlanet.z - playerPos.z;
+                const len = Math.sqrt(dx*dx+dy*dy+dz*dz);
+                
+                // Direction normal
+                h.dirX = dx/len; h.dirY = dy/len; h.dirZ = dz/len;
+                
+                // Push start pos "down" towards planet to exit ship nozzle
+                const startOffset = 4.0; 
+                h.x += h.dirX * startOffset;
+                h.y += h.dirY * startOffset;
+                h.z += h.dirZ * startOffset;
+            }
+        }
+        
+        if (h.life > 0) {
+            h.life -= 0.03;
+            const speed = 1.5;
+            h.x += h.dirX * speed;
+            h.y += h.dirY * speed;
+            h.z += h.dirZ * speed;
+            
+            hexDummy.position.set(h.x, h.y, h.z);
+            // Orient flat against the direction (look at planet center)
+            hexDummy.lookAt(currentPlanet.x, currentPlanet.y, currentPlanet.z);
+            
+            // Expand and "fade" by scaling
+            const s = (1.2 - h.life) * 5.0; // Grows as life decreases
+            hexDummy.scale.set(s, s, s);
+            
+            hexDummy.updateMatrix();
+            hexParticles.setMatrixAt(i, hexDummy.matrix);
+        } else {
+             hexDummy.scale.set(0,0,0);
+             hexDummy.updateMatrix();
+             hexParticles.setMatrixAt(i, hexDummy.matrix);
+        }
+    }
+    hexParticles.instanceMatrix.needsUpdate = true;
+}
+
+function updateFireParticles(player, planets) {
+    // Disable fire if we are orbiting (landed)
+    if (player.state === 'orbiting') {
+        fireParticles.visible = false;
+        return;
+    }
+
+    let reEntry = false;
+    let planet = null;
+    let minDist = Infinity;
+    planets.forEach(p => {
+        const d = V3.dist(player.pos, p);
+        if (d < minDist) { minDist = d; planet = p; }
+    });
+
+    if (planet) {
+        const atmRadius = planet.radius * 1.25;
+        if (minDist < atmRadius && minDist > planet.radius) {
+            reEntry = true;
+        }
+    }
+
+    if (reEntry) {
+        for(let i=0; i<5; i++) {
+            const idx = Math.floor(Math.random() * fireCount);
+            if (fireData[idx].life <= 0) {
+                fireData[idx].life = 1.0;
+                const velocityNorm = V3.magSq(player.vel) > 0.1 ? V3.norm(player.vel) : {x:0,y:0,z:0};
+                const backward = V3.scale(velocityNorm, -3);
+                const jitterX = (Math.random()-0.5)*2;
+                const jitterY = (Math.random()-0.5)*2;
+                const jitterZ = (Math.random()-0.5)*2;
+                fireData[idx].x = player.pos.x + backward.x + jitterX;
+                fireData[idx].y = player.pos.y + backward.y + jitterY;
+                fireData[idx].z = player.pos.z + backward.z + jitterZ;
+                fireData[idx].vx = (Math.random()-0.5)*0.5;
+                fireData[idx].vy = (Math.random()-0.5)*0.5;
+                fireData[idx].vz = (Math.random()-0.5)*0.5;
+            }
+        }
+    }
+
+    fireParticles.visible = reEntry || fireParticles.visible; // Keep visible if existing particles need to fade
+    
+    // Check if any particles are alive, otherwise we can hide
+    let anyAlive = false;
+    for(let i=0; i<fireCount; i++) {
+        const p = fireData[i];
+        if (p.life > 0) {
+            anyAlive = true;
+            p.x += p.vx; p.y += p.vy; p.z += p.vz;
+            p.life -= 0.05;
+            fireDummy.position.set(p.x, p.y, p.z);
+            fireDummy.lookAt(camera3D.position); 
+            const s = p.life * 2;
+            fireDummy.scale.set(s, s, s);
+        } else {
+            fireDummy.scale.set(0,0,0);
+        }
+        fireDummy.updateMatrix();
+        fireParticles.setMatrixAt(i, fireDummy.matrix);
+    }
+    
+    if (!anyAlive && !reEntry) fireParticles.visible = false;
+    else fireParticles.visible = true;
+
+    fireParticles.instanceMatrix.needsUpdate = true;
+}
+
+// --- Burst Text System ---
+function createFloatingText(x, y, z, text) {
+    floatingTexts.push({ x, y, z, text, life: 1.0, offset: 0 });
+}
+
+function updateFloatingTexts() {
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+        const t = floatingTexts[i];
+        t.life -= 0.015;
+        t.offset += 1; // Rise up
+        if (t.life <= 0) floatingTexts.splice(i, 1);
+    }
+}
+
+function drawFloatingTexts(ctx, camX, camY) {
+    ctx.font = "bold 20px Arial";
+    ctx.textAlign = "center";
+    
+    floatingTexts.forEach(t => {
+        let sx, sy;
+        
+        if (is3DMode) {
+            const vec = new THREE.Vector3(t.x, t.y, t.z);
+            vec.project(camera3D);
+            sx = (vec.x * 0.5 + 0.5) * width;
+            sy = (-(vec.y * 0.5) + 0.5) * height;
+        } else {
+            sx = t.x - camX;
+            sy = t.y - camY;
+        }
+
+        ctx.fillStyle = `rgba(255, 255, 100, ${t.life})`;
+        ctx.strokeStyle = `rgba(0, 0, 0, ${t.life * 0.5})`;
+        ctx.lineWidth = 3;
+        ctx.strokeText(t.text, sx, sy - t.offset);
+        ctx.fillText(t.text, sx, sy - t.offset);
+    });
+}
+
+
+function updateVisuals3D() {
+    let visualPos = { x: player.pos.x, y: player.pos.y, z: player.pos.z };
+    
+    if (player.state === 'orbiting' && player.currentPlanet) {
+        const p = player.currentPlanet;
+        const normal = V3.norm(V3.sub(player.pos, p));
+        visualPos = V3.add(p, V3.scale(normal, p.radius + 1.5));
+    }
+
+    playerMesh3D.position.set(visualPos.x, visualPos.y, visualPos.z);
+    
+    // --- SMOOTH PLAYER ROTATION ---
+    let forward = V3.norm(player.vel);
+    if (V3.magSq(player.vel) < 0.1) forward = V3.create(1, 0, 0); 
+    
+    let up = V3.create(0, 0, 1);
+    // Lazily align bottom with planet gravity if near one
+    if (player.state === 'orbiting' && player.currentPlanet) {
+        up = V3.norm(V3.sub(player.pos, player.currentPlanet));
+    } else {
+        // In flight, try to align 'down' to nearest planet
+        let closest = null; let minD = Infinity;
+        planets.forEach(p=>{const d=V3.dist(p, player.pos); if(d<minD){minD=d; closest=p;}});
+        if(closest && minD < MAX_GRAVITY_DIST) {
+            up = V3.norm(V3.sub(player.pos, closest));
+        }
+    }
+    
+    const targetM = new THREE.Matrix4();
+    targetM.lookAt(
+        new THREE.Vector3(0,0,0), 
+        new THREE.Vector3(forward.x, forward.y, forward.z), 
+        new THREE.Vector3(up.x, up.y, up.z)
+    );
+    const targetQ = new THREE.Quaternion();
+    targetQ.setFromRotationMatrix(targetM);
+    
+    // Slerp current visual rotation to target rotation
+    playerMesh3D.quaternion.slerp(targetQ, 0.08); // Lazy rotation
+
+    // --- SMOOTH CAMERA LOGIC ---
+    let idealOffset;
+    let idealLookAt = player.pos;
+
+    // Standard chase logic
+    if (player.state === 'orbiting' && player.currentPlanet) {
+         const pNormal = V3.norm(V3.sub(player.pos, player.currentPlanet));
+         const backVec = V3.scale(forward, -100);
+         const upVec = V3.scale(pNormal, 60);
+         idealOffset = V3.add(player.pos, V3.add(backVec, upVec));
+         camUpSmooth.lerp(new THREE.Vector3(pNormal.x, pNormal.y, pNormal.z), 0.05);
+
+    } else {
+        const backVec = V3.scale(forward, -120);
+        // Use the smoothed up vector for camera offset to prevent flipping
+        const camUpV3 = {x: camUpSmooth.x, y: camUpSmooth.y, z: camUpSmooth.z}; 
+        const upVec = V3.scale(camUpV3, 60); 
+        idealOffset = V3.add(player.pos, V3.add(backVec, upVec));
+        
+        let closest = null; let minD = Infinity;
+        planets.forEach(p=>{const d=V3.dist(p, player.pos); if(d<minD){minD=d; closest=p;}});
+        if(closest && minD < MAX_GRAVITY_DIST) {
+             const pNormal = V3.norm(V3.sub(player.pos, closest));
+             camUpSmooth.lerp(new THREE.Vector3(pNormal.x, pNormal.y, pNormal.z), 0.02);
+        } else {
+             camUpSmooth.lerp(new THREE.Vector3(0,1,0), 0.01);
+        }
+    }
+    
+    // Damp positions FIRST
+    let idealV3 = new THREE.Vector3(idealOffset.x, idealOffset.y, idealOffset.z);
+    camPosSmooth.lerp(idealV3, 0.05); 
+    camLookAtSmooth.lerp(new THREE.Vector3(idealLookAt.x, idealLookAt.y, idealLookAt.z), 0.1); 
+
+    // THEN Collision Check: Prevent Camera clipping planets
+    // This pushes the smoothed position out immediately if it enters a planet
+    planets.forEach(p => {
+        const center = new THREE.Vector3(p.x, p.y, p.z);
+        const dist = camPosSmooth.distanceTo(center);
+        const buffer = 20;
+        if (dist < p.radius + buffer) {
+            // Push out along normal
+            const normal = new THREE.Vector3().subVectors(camPosSmooth, center).normalize();
+            camPosSmooth.copy(center.add(normal.multiplyScalar(p.radius + buffer)));
+        }
+    });
+
+    // Apply
+    camera3D.position.copy(camPosSmooth);
+    camera3D.up.copy(camUpSmooth);
+    camera3D.lookAt(camLookAtSmooth);
+
+    const positions = starPoints.geometry.attributes.position.array;
+    const spread = 2000;
+    const halfSpread = spread / 2;
+    for (let i = 0; i < positions.length; i += 3) {
+        let x = positions[i]; let y = positions[i+1]; let z = positions[i+2];
+        const dx = player.pos.x - x; const dy = player.pos.y - y; const dz = player.pos.z - z;
+        if (dx > halfSpread) positions[i] += spread; if (dx < -halfSpread) positions[i] -= spread;
+        if (dy > halfSpread) positions[i+1] += spread; if (dy < -halfSpread) positions[i+1] -= spread;
+        if (dz > halfSpread) positions[i+2] += spread; if (dz < -halfSpread) positions[i+2] -= spread;
+    }
+    starPoints.geometry.attributes.position.needsUpdate = true;
+    
+    // Pass current planet to hex particles
+    updateHexParticles(player.pos, player.currentPlanet);
+    
+    updateFireParticles(player, planets);
+
+    planets.forEach(p => {
+        if (!planetMeshes.has(p)) {
+            const group = new THREE.Group();
+            group.position.set(p.x, p.y, p.z);
+            const mat = new THREE.ShaderMaterial({
+                uniforms: {
+                    color1: { value: new THREE.Color(p.colors[0]) },
+                    color2: { value: new THREE.Color(p.colors[1]) },
+                    color3: { value: new THREE.Color(p.colors[2]) },
+                    color4: { value: new THREE.Color(p.colors[3]) },
+                    color5: { value: new THREE.Color(p.colors[4]) }
+                },
+                vertexShader: planetVertexShader,
+                fragmentShader: planetFragmentShader
+            });
+            const sphereMesh = new THREE.Mesh(sharedSphereGeo, mat);
+            sphereMesh.scale.set(p.radius, p.radius, p.radius);
+            group.add(sphereMesh);
+            scene.add(group);
+            planetMeshes.set(p, group);
+        }
+    });
+
+    for (let [p, mesh] of planetMeshes) {
+        if (V3.dist(p, player.pos) > 2500) {
+            scene.remove(mesh);
+            planetMeshes.delete(p);
+        }
+    }
+    renderer3D.render(scene, camera3D);
+}
+
+// --- Classes ---
+
+class Planet {
+    constructor(x, y, z, radius, type) {
+        this.x = x; this.y = y; this.z = z;
+        this.radius = radius;
+        this.mass = radius * radius * 0.5;
+        this.baseColor = this.generateColor(type);
+        this.colors = this.generateBiomeColors(this.baseColor); // 5 colors
+        this.visited = false;
+        this.atmosphereColor = `rgba(${this.baseColor.r}, ${this.baseColor.g}, ${this.baseColor.b}, 0.2)`;
+    }
+    
+    generateColor(val) {
+        const r = Math.floor(100 + val * 155);
+        const g = Math.floor(50 + Math.random() * 100);
+        const b = Math.floor(100 + Math.random() * 155);
+        return { r, g, b, str: `rgb(${r},${g},${b})` };
+    }
+    
+    generateBiomeColors(base) {
+        // Generate 5 variations
+        const c1 = new THREE.Color(`rgb(${base.r}, ${base.g}, ${base.b})`);
+        const c2 = c1.clone().multiplyScalar(0.8);
+        const c3 = c1.clone().multiplyScalar(1.2); 
+        const c4 = c1.clone().offsetHSL(0.05, 0, -0.1);
+        const c5 = c1.clone().offsetHSL(-0.05, 0, 0.2);
+
+        return [c1.getStyle(), c2.getStyle(), c3.getStyle(), c4.getStyle(), c5.getStyle()];
+    }
+    
+    draw(ctx, camX, camY) {
+        ctx.beginPath();
+        ctx.arc(this.x - camX, this.y - camY, this.radius * 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = this.atmosphereColor;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(this.x - camX, this.y - camY, this.radius, 0, Math.PI * 2);
+        const grad = ctx.createRadialGradient(
+            this.x - camX - this.radius * 0.3, 
+            this.y - camY - this.radius * 0.3, 
+            this.radius * 0.1, 
+            this.x - camX, 
+            this.y - camY, 
+            this.radius
+        );
+        grad.addColorStop(0, this.baseColor.str);
+        grad.addColorStop(1, 'rgba(10,10,20,1)'); 
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        if (this.visited) {
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(this.x - camX, this.y - camY, this.radius + 5, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
+}
+
+class Player {
+    constructor() {
+        this.width = 12;
+        this.height = 16;
+        this.color = '#00ffff';
+        this.reset();
+    }
+
+    reset() {
+        this.state = 'orbiting'; 
+        this.currentPlanet = null; 
+        this.runSpeed = 4.0;
+        this.angle = -Math.PI/2; 
+        this.pos = V3.create(0, 0, 0);
+        this.vel = V3.create(0, 0, 0);
+        this.orbitAxis = V3.create(0, 0, 1);
+        this.jumpStartPos = null;
+    }
+
+    update() {
+        if (this.state === 'orbiting') this.updateOrbit();
+        else this.updateFlight();
+    }
+
+    updateOrbit() {
+        if (!this.currentPlanet) return;
+        const p = this.currentPlanet;
+
+        if (is3DMode) {
+            const normal = V3.norm(V3.sub(this.pos, p));
+            const steerSpeed = 0.03;
+            if (inputState.left) this.orbitAxis = V3.norm(V3.rotate(this.orbitAxis, normal, steerSpeed));
+            if (inputState.right) this.orbitAxis = V3.norm(V3.rotate(this.orbitAxis, normal, -steerSpeed));
+        }
+
+        const omega = this.runSpeed / p.radius;
+        const relPos = V3.sub(this.pos, p);
+        const newRelPos = V3.rotate(relPos, this.orbitAxis, omega);
+        this.pos = V3.add(p, newRelPos);
+        
+        this.angle = Math.atan2(newRelPos.y, newRelPos.x);
+
+        const normal = V3.norm(newRelPos);
+        const tangent = V3.norm(V3.cross(this.orbitAxis, normal));
+        this.vel = V3.scale(tangent, this.runSpeed);
+    }
+
+    updateFlight() {
+        let gravity = V3.create(0, 0, 0);
+
+        planets.forEach(p => {
+            const dist = V3.dist(p, this.pos);
+            if (dist < MAX_GRAVITY_DIST) {
+                const fMag = (GRAVITY * p.mass) / (dist*dist);
+                const dir = V3.norm(V3.sub(p, this.pos));
+                gravity = V3.add(gravity, V3.scale(dir, fMag));
+                if (dist < p.radius + 1.0) this.land(p);
+            }
+        });
+
+        this.vel = V3.add(this.vel, gravity);
+        this.pos = V3.add(this.pos, this.vel);
+        
+        if (!is3DMode) {
+            this.pos.z = 0;
+            this.vel.z = 0;
+        }
+    }
+
+    jump() {
+        if (this.state !== 'orbiting' || !this.currentPlanet) return;
+        
+        this.jumpStartPos = { ...this.pos };
+
+        const normal = V3.norm(V3.sub(this.pos, this.currentPlanet));
+        
+        // FIX: Use current velocity direction for jump tangent to match visual heading
+        // If speed is near zero, fallback to cross product
+        let tangent;
+        if (V3.magSq(this.vel) > 0.01) {
+             tangent = V3.norm(this.vel);
+        } else {
+             tangent = V3.norm(V3.cross(this.orbitAxis, normal));
+        }
+        
+        const jumpStrength = 7.0;
+        const jumpVec = V3.add(
+            V3.scale(tangent, this.runSpeed * 1.2),
+            V3.scale(normal, jumpStrength)
+        );
+        
+        this.vel = jumpVec;
+        // Increased initial nudge to ensure clearing landing detection
+        this.pos = V3.add(this.pos, V3.scale(normal, 4.0));
+
+        this.state = 'flying';
+        this.currentPlanet = null;
+    }
+
+    land(planet) {
+        this.state = 'orbiting';
+        this.currentPlanet = planet;
+        
+        const normal = V3.norm(V3.sub(this.pos, planet));
+        let tangent = V3.norm(this.vel);
+        if (V3.magSq(tangent) === 0) tangent = V3.create(1, 0, 0);
+        
+        this.orbitAxis = V3.norm(V3.cross(normal, tangent));
+        this.pos = V3.add(planet, V3.scale(normal, planet.radius + 0.1));
+        
+        const correctedTangent = V3.norm(V3.cross(this.orbitAxis, normal));
+        this.vel = V3.scale(correctedTangent, this.runSpeed);
+
+        if (!planet.visited) {
+            let points = 100;
+            if (this.jumpStartPos) {
+                const dist = V3.dist(this.pos, this.jumpStartPos);
+                points = Math.floor(dist);
+            }
+            score += points;
+            scoreEl.innerText = score;
+            planet.visited = true;
+            createFloatingText(this.pos.x, this.pos.y, this.pos.z, "+" + points);
+        }
+    }
+}
+
+// --- Procedural Generation ---
+
+const generatedChunks = new Set();
+function getChunkId(gx, gy, gz) { return `${gx},${gy},${gz}`; }
+
+function generateWorld(px, py, pz) {
+    const gx = Math.floor(px / GRID_SIZE);
+    const gy = Math.floor(py / GRID_SIZE);
+    const gz = Math.floor(pz / GRID_SIZE);
+
+    const rad = 2; 
+    const zMin = is3DMode ? gz - rad : 0;
+    const zMax = is3DMode ? gz + rad : 0;
+
+    for (let x = gx - rad; x <= gx + rad; x++) {
+        for (let y = gy - rad; y <= gy + rad; y++) {
+            for (let z = zMin; z <= zMax; z++) {
+                const id = getChunkId(x, y, z);
+                if (!generatedChunks.has(id)) {
+                    generateChunk(x, y, z);
+                    generatedChunks.add(id);
+                }
+            }
+        }
+    }
+}
+
+function generateChunk(gx, gy, gz) {
+    const scale = 0.1;
+    const noiseVal = Perlin.noise(gx * scale, gy * scale, gz * scale);
+    const seed = gx * 123 + gy * 456 + gz * 789;
+    const rnd = Math.abs(Math.sin(seed));
+
+    if (noiseVal > 0.15 || (rnd > 0.85)) {
+        const cx = gx * GRID_SIZE + GRID_SIZE / 2;
+        const cy = gy * GRID_SIZE + GRID_SIZE / 2;
+        const cz = gz * GRID_SIZE + GRID_SIZE / 2;
+        
+        const ox = (Math.cos(seed) * GRID_SIZE) * 0.3;
+        const oy = (Math.sin(seed * 2) * GRID_SIZE) * 0.3;
+        const oz = (Math.cos(seed * 3) * GRID_SIZE) * 0.3;
+
+        let px = cx + ox;
+        let py = cy + oy;
+        let pz = is3DMode ? cz + oz : 0;
+        let radius = 30 + rnd * 60;
+
+        if (gx === 0 && gy === 0 && gz === 0) {
+            px=0; py=0; pz=0; radius=60;
+        }
+
+        const p = new Planet(px, py, pz, radius, noiseVal);
+        if (gx===0 && gy===0 && gz===0) p.visited = true;
+        planets.push(p);
+    }
+}
+
+// --- Main Loop ---
+
+function init() {
+    resize();
+    init3D();
+    player = new Player();
+    resetGameMode();
+    loop();
+}
+
+function resetGameMode() {
+    is3DMode = modeToggle.checked;
+    
+    planets = [];
+    generatedChunks.clear();
+    planetMeshes.forEach(mesh => scene.remove(mesh));
+    planetMeshes.clear();
+    
+    player.reset();
+    
+    const c3d = document.getElementById('threeCanvas');
+    const c2d = document.getElementById('gameCanvas');
+    if (is3DMode) {
+        c3d.style.display = 'block';
+        c2d.style.display = 'block'; 
+        steerHint.style.display = 'block';
+        
+        player.runSpeed = 0.5;
+        speedSlider.value = 0.5;
+        speedVal.innerText = 0.5;
+        
+        // Reset cam smoothers
+        camPosSmooth.set(0,0,500);
+        camUpSmooth.set(0,1,0);
+    } else {
+        c3d.style.display = 'none';
+        c2d.style.display = 'block';
+        steerHint.style.display = 'none';
+
+        player.runSpeed = 4.0;
+        speedSlider.value = 4.0;
+        speedVal.innerText = 4.0;
+    }
+
+    generateWorld(0, 0, 0);
+
+    if (planets.length === 0) planets.push(new Planet(0,0,0, 60, 0.5));
+    
+    let bestP = null;
+    let minDst = Infinity;
+    planets.forEach(p => {
+        const d = Math.sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
+        if (d < minDst) { minDst = d; bestP = p; }
+    });
+
+    if (bestP) {
+        player.pos = V3.create(bestP.x, bestP.y - bestP.radius - 10, bestP.z);
+        player.land(bestP);
+        player.updateOrbit();
+    }
+}
+
+modeToggle.addEventListener('change', resetGameMode);
+advancedToggle.addEventListener('change', () => {
+    advancedControls.style.display = advancedToggle.checked ? 'block' : 'none';
+});
+speedSlider.addEventListener('input', () => {
+    player.runSpeed = parseFloat(speedSlider.value);
+    speedVal.innerText = speedSlider.value;
+});
+
+function update() {
+    gameTime++;
+    player.update();
+    generateWorld(player.pos.x, player.pos.y, player.pos.z);
+    
+    velEl.innerText = Math.round(V3.mag(player.vel));
+    coordsEl.innerText = `${Math.round(player.pos.x)}, ${Math.round(player.pos.y)}, ${Math.round(player.pos.z)}`;
+
+    updateFloatingTexts();
+    if (is3DMode) updateVisuals3D();
+}
+
+function draw2D() {
+    if (is3DMode) {
+        ctx.clearRect(0, 0, width, height);
+        drawFloatingTexts(ctx, 0, 0);
+        return;
+    }
+    
+    ctx.fillStyle = '#050510';
+    ctx.fillRect(0, 0, width, height);
+
+    if (!stars.length) {
+        for(let i=0; i<100; i++) stars.push({x:Math.random()*width, y:Math.random()*height, a:Math.random()});
+    }
+    ctx.fillStyle = 'white';
+    stars.forEach(s => {
+        ctx.globalAlpha = s.a;
+        ctx.fillRect((s.x - camera.x*0.1)%width, (s.y - camera.y*0.1)%height, 2, 2);
+    });
+    ctx.globalAlpha = 1;
+
+    const targetX = player.pos.x - width/2;
+    const targetY = player.pos.y - height/2;
+    camera.x += (targetX - camera.x) * 0.1;
+    camera.y += (targetY - camera.y) * 0.1;
+
+    ctx.save();
+    ctx.translate(-camera.x, -camera.y);
+
+    planets.forEach(p => {
+        if (Math.abs(p.x - player.pos.x) < width && Math.abs(p.y - player.pos.y) < height) {
+            p.draw(ctx, 0, 0); 
+        }
+    });
+
+    // 2D Player
+    ctx.save();
+    ctx.translate(player.pos.x, player.pos.y);
+    let rot = player.angle + Math.PI/2;
+    if (player.state === 'flying') rot = Math.atan2(player.vel.y, player.vel.x) + Math.PI/2;
+    ctx.rotate(rot);
+
+    ctx.fillStyle = player.color;
+    ctx.beginPath();
+    ctx.moveTo(0, -player.height);
+    ctx.lineTo(-player.width/2, player.height/2);
+    ctx.lineTo(player.width/2, player.height/2);
+    ctx.closePath();
+    ctx.fill();
+
+    if (player.state === 'flying') {
+        ctx.beginPath();
+        ctx.moveTo(-3, player.height/2);
+        ctx.lineTo(3, player.height/2);
+        ctx.lineTo(0, player.height/2 + Math.random() * 10);
+        ctx.fillStyle = '#ffaa00';
+        ctx.fill();
+    }
+    ctx.restore();
+    
+    // Draw text in 2D world space relative to cam
+    drawFloatingTexts(ctx, camera.x, camera.y);
+    
+    ctx.restore();
+}
+
+function handleJump() {
+    if (player.state === 'orbiting') player.jump();
+}
+
+window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') handleJump();
+    if (e.code === 'ArrowLeft') inputState.left = true;
+    if (e.code === 'ArrowRight') inputState.right = true;
+});
+
+window.addEventListener('keyup', (e) => {
+    if (e.code === 'ArrowLeft') inputState.left = false;
+    if (e.code === 'ArrowRight') inputState.right = false;
+});
+
+window.addEventListener('mousedown', (e) => {
+    if (e.target.tagName !== 'INPUT') handleJump();
+});
+
+window.addEventListener('touchstart', (e) => {
+    if (e.target.tagName !== 'INPUT') {
+        e.preventDefault();
+        handleJump();
+    }
+}, {passive: false});
+
+function loop() {
+    update();
+    draw2D();
+    requestAnimationFrame(loop);
+}
+
+init();
+
+</script>
+</body>
+</html>
